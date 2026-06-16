@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import MainLayout from "../layouts/MainLayout";
 import { addAuditLog } from "../services/auditService";
 import {
-  getDefaultSettings,
   getSettings,
   resetSettings,
   saveSettings,
