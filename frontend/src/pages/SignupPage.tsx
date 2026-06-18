@@ -3,6 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 
 import AuthLayout from "../layouts/AuthLayout";
 import { getHomeRouteForRole, signup } from "../services/authService";
+import { syncProductsCache } from "../services/productsApi";
+import { syncSalesCache } from "../services/salesService";
+import { syncCashRegisterCache } from "../services/cashRegisterService";
 import type { UserRole } from "../types/User";
 
 export default function SignupPage() {
@@ -11,21 +14,33 @@ export default function SignupPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<UserRole>("cashier");
+  const [role, setRole] = useState<Exclude<UserRole, "admin">>("cashier");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  function handleSignup() {
+  async function handleSignup() {
     try {
-      const user = signup({
+      setError("");
+      setLoading(true);
+
+      const user = await signup({
         name,
         email,
         password,
         role,
       });
 
+      await Promise.allSettled([
+        syncProductsCache(),
+        syncSalesCache(),
+        syncCashRegisterCache(),
+      ]);
+
       navigate(getHomeRouteForRole(user.role), { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to create account");
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -80,7 +95,7 @@ export default function SignupPage() {
           <label className="mb-2 block text-sm font-medium">Role</label>
           <select
             value={role}
-            onChange={(e) => setRole(e.target.value as UserRole)}
+            onChange={(e) => setRole(e.target.value as Exclude<UserRole, "admin">)}
             className="w-full rounded-xl border p-3"
           >
             <option value="cashier">Cashier</option>
@@ -89,10 +104,11 @@ export default function SignupPage() {
         </div>
 
         <button
-          className="w-full rounded-xl bg-blue-600 p-3 font-semibold text-white hover:bg-blue-700"
+          className="w-full rounded-xl bg-blue-600 p-3 font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
           onClick={handleSignup}
+          disabled={loading}
         >
-          Create Account
+          {loading ? "Creating..." : "Create Account"}
         </button>
 
         <div className="mt-4 text-center text-sm">

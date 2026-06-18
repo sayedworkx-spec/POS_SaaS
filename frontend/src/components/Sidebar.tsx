@@ -17,6 +17,7 @@ type NavItem = {
 const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", roles: ["admin", "cashier", "warehouse"] },
   { to: "/sales", label: "Sales POS", roles: ["admin", "cashier"] },
+  { to: "/suspended-sales", label: "Held Sales", roles: ["admin", "cashier"] },
   { to: "/cash-register", label: "Cash Register", roles: ["admin", "cashier"] },
   { to: "/sales-history", label: "Sales History", roles: ["admin", "cashier"] },
   { to: "/returns", label: "Returns", roles: ["admin", "cashier"] },

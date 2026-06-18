@@ -1,26 +1,27 @@
-export interface ReturnItem {
+export interface SalesReturnItem {
+  id: number;
+  returnId: number;
   productId: number;
   sku: string;
   name: string;
   quantity: number;
   unitPrice: number;
-  costPrice: number;
-  refundAmount: number;
-  costAmount: number;
+  refundTotal: number;
 }
 
-export interface SaleReturn {
+export interface SalesReturn {
   id: number;
   returnNumber: string;
   returnDate: string;
-  originalSaleId: number;
-  originalInvoiceNumber: string;
+  saleId: number;
+  invoiceNumber: string;
   cashier: string;
-  paymentMethod: "cash" | "card";
   reason: string;
-  createdBy: string;
+  refundMethod: "cash" | "card";
+  shiftId: number | null;
+  subtotal: number;
   refundAmount: number;
-  costAmount: number;
-  profitImpact: number;
-  items: ReturnItem[];
+  items: SalesReturnItem[];
+  createdAt?: string;
+  updatedAt?: string;
 }

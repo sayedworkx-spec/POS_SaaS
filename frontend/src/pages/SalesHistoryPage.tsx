@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import MainLayout from "../layouts/MainLayout";
-import { getSales } from "../services/salesService";
+import { getSales, syncSalesCache } from "../services/salesService";
 
 import type { Sale } from "../types/Sale";
 
@@ -31,10 +31,34 @@ function formatShortDate(value: string) {
 export default function SalesHistoryPage() {
   const [search, setSearch] = useState("");
   const [selectedInvoiceNumber, setSelectedInvoiceNumber] = useState("");
+  const [sales, setSales] = useState<Sale[]>(() => getSales());
+
+  useEffect(() => {
+    let active = true;
+
+    async function load() {
+      try {
+        const fresh = await syncSalesCache();
+        if (active) {
+          setSales(fresh);
+        }
+      } catch {
+        if (active) {
+          setSales(getSales());
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const invoices = useMemo(() => {
-    return getSales().slice().reverse();
-  }, []);
+    return sales.slice().reverse();
+  }, [sales]);
 
   const filteredInvoices = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -136,7 +160,8 @@ export default function SalesHistoryPage() {
                             {invoice.cashier} • {formatShortDate(invoice.saleDate)}
                           </div>
                           <div className="text-xs text-slate-500 mt-1">
-                            {invoice.paymentMethod.toUpperCase()} • Shift #{String(invoice.shiftId).slice(-6)}
+                            {invoice.paymentMethod.toUpperCase()} • Shift #
+                            {String(invoice.shiftId).slice(-6)}
                           </div>
                         </div>
 

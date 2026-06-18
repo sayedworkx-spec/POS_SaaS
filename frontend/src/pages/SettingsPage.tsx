@@ -13,7 +13,6 @@ import type { AppSettings } from "../types/Settings";
 
 export default function SettingsPage() {
   const currentUser = getCurrentUser();
-
   const [settings, setSettings] = useState<AppSettings>(() => getSettings());
 
   useEffect(() => {
@@ -40,7 +39,11 @@ export default function SettingsPage() {
     const defaults = resetSettings();
     setSettings(defaults);
 
-    addAuditLog("SETTINGS_RESET", "Settings reset to defaults", currentUser?.name ?? "Admin");
+    addAuditLog(
+      "SETTINGS_RESET",
+      "Settings reset to defaults",
+      currentUser?.name ?? "Admin"
+    );
   }
 
   return (
@@ -217,7 +220,7 @@ export default function SettingsPage() {
             </div>
 
             <div className="rounded-xl border border-dashed p-4 text-sm text-slate-500">
-              Defaults are loaded from localStorage. No backend is required.
+              Defaults are stored in localStorage. No backend is required yet.
             </div>
           </div>
         </section>

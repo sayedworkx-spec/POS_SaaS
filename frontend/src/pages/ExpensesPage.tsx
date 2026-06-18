@@ -1,16 +1,17 @@
-import { useMemo, useState } from "react";
-import MainLayout from "../layouts/MainLayout";
+import { useEffect, useMemo, useState } from "react";
 
+import MainLayout from "../layouts/MainLayout";
 import { getCurrentUser } from "../services/authService";
-import { addExpense, deleteExpense, getExpenses } from "../services/expenseService";
-import { getCurrentShift, getShiftSummary } from "../services/cashRegisterService";
+import { getCurrentShift, syncCashRegisterCache } from "../services/cashRegisterService";
+import { createExpense, getExpenses, syncExpensesCache } from "../services/expenseService";
+import { getSettings } from "../services/settingsService";
 
 import type { Expense } from "../types/Expense";
 
-function formatMoney(value: number) {
-  return new Intl.NumberFormat("en-US", {
+function formatMoney(value: number, symbol: string) {
+  return `${symbol}${new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 0,
-  }).format(value);
+  }).format(value)}`;
 }
 
 function formatDate(value: string) {
@@ -20,141 +21,108 @@ function formatDate(value: string) {
   });
 }
 
-function isToday(dateString: string) {
-  const value = new Date(dateString);
-  const today = new Date();
-  return value.toDateString() === today.toDateString();
-}
-
-function isSameMonth(dateString: string) {
-  const value = new Date(dateString);
-  const today = new Date();
-
-  return (
-    value.getFullYear() === today.getFullYear() &&
-    value.getMonth() === today.getMonth()
-  );
-}
-
-const PRESET_CATEGORIES = [
-  "General",
-  "Rent",
-  "Utilities",
-  "Supplies",
-  "Delivery",
-  "Maintenance",
-  "Refund",
-  "Salary",
-];
-
 export default function ExpensesPage() {
   const currentUser = getCurrentUser();
+  const settings = getSettings();
   const currentShift = getCurrentShift();
-  const shiftSummary = currentShift ? getShiftSummary(currentShift.id) : null;
 
   const [expenses, setExpenses] = useState<Expense[]>(() => getExpenses());
-  const [search, setSearch] = useState("");
-  const [title, setTitle] = useState("");
+  const [expenseNumber, setExpenseNumber] = useState(`EXP-${Date.now().toString().slice(-6)}`);
+  const [expenseDate, setExpenseDate] = useState(new Date().toISOString().slice(0, 16));
   const [category, setCategory] = useState("General");
+  const [description, setDescription] = useState("");
   const [amount, setAmount] = useState(0);
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "card">("cash");
-  const [notes, setNotes] = useState("");
-  const [customCategory, setCustomCategory] = useState("");
-  const [useCustomCategory, setUseCustomCategory] = useState(false);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+  const [filterMethod, setFilterMethod] = useState<"all" | "cash" | "card">("all");
 
-  const activeCategory = useCustomCategory ? customCategory : category;
+  async function refreshAll() {
+    try {
+      const fresh = await syncExpensesCache();
+      setExpenses(fresh);
+    } catch {
+      setExpenses(getExpenses());
+    }
+  }
+
+  useEffect(() => {
+    void refreshAll();
+  }, []);
 
   const filteredExpenses = useMemo(() => {
     const term = search.trim().toLowerCase();
 
-    return expenses.filter((expense) => {
+    return expenses.filter((item) => {
       const matchesSearch =
         !term ||
-        expense.expenseNumber.toLowerCase().includes(term) ||
-        expense.title.toLowerCase().includes(term) ||
-        expense.category.toLowerCase().includes(term) ||
-        expense.createdBy.toLowerCase().includes(term);
+        item.expenseNumber.toLowerCase().includes(term) ||
+        item.category.toLowerCase().includes(term) ||
+        item.description.toLowerCase().includes(term) ||
+        item.createdBy.toLowerCase().includes(term);
 
-      return matchesSearch;
+      const matchesMethod =
+        filterMethod === "all" || item.paymentMethod === filterMethod;
+
+      return matchesSearch && matchesMethod;
     });
-  }, [expenses, search]);
+  }, [expenses, search, filterMethod]);
 
-  const todayExpenses = useMemo(() => {
-    return expenses.filter((expense) => isToday(expense.expenseDate));
+  const totalExpenses = useMemo(() => {
+    return expenses.reduce((sum, item) => sum + item.amount, 0);
   }, [expenses]);
 
-  const monthExpenses = useMemo(() => {
-    return expenses.filter((expense) => isSameMonth(expense.expenseDate));
+  const cashExpenses = useMemo(() => {
+    return expenses
+      .filter((item) => item.paymentMethod === "cash")
+      .reduce((sum, item) => sum + item.amount, 0);
   }, [expenses]);
 
-  const todayTotal = useMemo(
-    () => todayExpenses.reduce((sum, item) => sum + item.amount, 0),
-    [todayExpenses]
-  );
+  const cardExpenses = useMemo(() => {
+    return expenses
+      .filter((item) => item.paymentMethod === "card")
+      .reduce((sum, item) => sum + item.amount, 0);
+  }, [expenses]);
 
-  const monthTotal = useMemo(
-    () => monthExpenses.reduce((sum, item) => sum + item.amount, 0),
-    [monthExpenses]
-  );
+  async function handleCreate() {
+  try {
+    setSaving(true);
+    setError("");
 
-  const cashExpensesTotal = useMemo(
-    () =>
-      monthExpenses
-        .filter((expense) => expense.paymentMethod === "cash")
-        .reduce((sum, item) => sum + item.amount, 0),
-    [monthExpenses]
-  );
+    await createExpense({
+      expenseNumber,
+      expenseDate: new Date(expenseDate).toISOString(),
+      category,
+      description,
+      amount,
+      paymentMethod,
+      shiftId:
+        paymentMethod === "cash"
+          ? currentShift?.id ?? null
+          : null,
+      createdBy: currentUser?.name ?? "System",
+    });
 
-  const cardExpensesTotal = useMemo(
-    () =>
-      monthExpenses
-        .filter((expense) => expense.paymentMethod === "card")
-        .reduce((sum, item) => sum + item.amount, 0),
-    [monthExpenses]
-  );
+    if (paymentMethod === "cash") {
+      await syncCashRegisterCache();
+    }
 
-  const openShiftStatus = currentShift ? "OPEN" : "CLOSED";
+    await refreshAll();
 
-  function refreshExpenses() {
-    setExpenses(getExpenses());
-  }
-
-  function resetForm() {
-    setTitle("");
+    setExpenseNumber(`EXP-${Date.now().toString().slice(-6)}`);
+    setExpenseDate(new Date().toISOString().slice(0, 16));
     setCategory("General");
+    setDescription("");
     setAmount(0);
     setPaymentMethod("cash");
-    setNotes("");
-    setCustomCategory("");
-    setUseCustomCategory(false);
+    setError("");
+  } catch (err) {
+    setError(err instanceof Error ? err.message : "Unable to save expense");
+  } finally {
+    setSaving(false);
   }
-
-  function handleSave() {
-    try {
-      const result = addExpense({
-        expenseDate: new Date().toISOString(),
-        title,
-        category: activeCategory,
-        amount,
-        paymentMethod,
-        notes,
-        createdBy: currentUser?.name ?? "Admin",
-      });
-
-      setExpenses((current) => [...current, result]);
-      resetForm();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Unable to save expense");
-    }
-  }
-
-  function handleDelete(expenseId: number) {
-    const ok = window.confirm("Delete this expense?");
-    if (!ok) return;
-
-    deleteExpense(expenseId);
-    refreshExpenses();
-  }
+}
 
   return (
     <MainLayout>
@@ -162,250 +130,211 @@ export default function ExpensesPage() {
         <div>
           <h1 className="text-3xl font-bold">Expenses</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Record cash out and operating expenses
+            Record operating expenses and tie cash expenses to the shift
           </p>
+          {currentUser && (
+            <div className="mt-2 text-xs text-slate-400">
+              Signed in as {currentUser.name}
+            </div>
+          )}
         </div>
 
-        <div className="flex flex-wrap gap-3">
-          <div className="rounded-xl bg-white px-4 py-3 shadow">
-            <div className="text-xs text-slate-500">Shift</div>
-            <div className="font-bold mt-1">{openShiftStatus}</div>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="rounded-2xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Total</div>
+            <div className="mt-1 text-xl font-bold">
+              {formatMoney(totalExpenses, settings.currencySymbol)}
+            </div>
           </div>
 
-          <div className="rounded-xl bg-white px-4 py-3 shadow">
-            <div className="text-xs text-slate-500">Expected Cash</div>
-            <div className="font-bold mt-1">
-              {formatMoney(shiftSummary?.expectedCash ?? 0)}
+          <div className="rounded-2xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Cash</div>
+            <div className="mt-1 text-xl font-bold text-red-600">
+              {formatMoney(cashExpenses, settings.currencySymbol)}
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Card</div>
+            <div className="mt-1 text-xl font-bold text-slate-700">
+              {formatMoney(cardExpenses, settings.currencySymbol)}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 mb-6">
-        <div className="bg-white rounded-2xl shadow p-5">
-          <div className="text-xs text-slate-500">Today's Expenses</div>
-          <div className="text-3xl font-bold mt-2">{formatMoney(todayTotal)}</div>
-          <div className="text-sm text-slate-500 mt-2">
-            {todayExpenses.length} records
-          </div>
+      {error && (
+        <div className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-700">
+          {error}
         </div>
+      )}
 
-        <div className="bg-white rounded-2xl shadow p-5">
-          <div className="text-xs text-slate-500">Month Expenses</div>
-          <div className="text-3xl font-bold mt-2">{formatMoney(monthTotal)}</div>
-          <div className="text-sm text-slate-500 mt-2">
-            {monthExpenses.length} records
-          </div>
-        </div>
+      <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <section className="rounded-2xl bg-white p-6 shadow">
+          <h2 className="text-xl font-bold">New Expense</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Add a fresh expense record
+          </p>
 
-        <div className="bg-white rounded-2xl shadow p-5">
-          <div className="text-xs text-slate-500">Cash Expenses</div>
-          <div className="text-3xl font-bold mt-2 text-red-600">
-            {formatMoney(cashExpensesTotal)}
-          </div>
-          <div className="text-sm text-slate-500 mt-2">This month</div>
-        </div>
-
-        <div className="bg-white rounded-2xl shadow p-5">
-          <div className="text-xs text-slate-500">Card Expenses</div>
-          <div className="text-3xl font-bold mt-2 text-blue-600">
-            {formatMoney(cardExpensesTotal)}
-          </div>
-          <div className="text-sm text-slate-500 mt-2">This month</div>
-        </div>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-[1fr_1.1fr]">
-        <section className="bg-white rounded-2xl shadow p-6">
-          <div className="flex items-center justify-between mb-5">
+          <div className="mt-5 grid gap-4">
             <div>
-              <h2 className="text-xl font-bold">New Expense</h2>
-              <p className="text-sm text-slate-500 mt-1">
-                Add a manual expense or cash out
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-2">Title</label>
+              <label className="mb-2 block text-sm font-medium">Expense Number</label>
               <input
                 type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                className="w-full border rounded-xl p-3"
-                placeholder="Rent payment"
+                value={expenseNumber}
+                onChange={(e) => setExpenseNumber(e.target.value)}
+                className="w-full rounded-xl border p-3"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">Date</label>
+              <input
+                type="datetime-local"
+                value={expenseDate}
+                onChange={(e) => setExpenseDate(e.target.value)}
+                className="w-full rounded-xl border p-3"
               />
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
               <div>
-                <label className="block text-sm font-medium mb-2">Category</label>
-
-                {!useCustomCategory ? (
-                  <select
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full border rounded-xl p-3"
-                  >
-                    {PRESET_CATEGORIES.map((item) => (
-                      <option key={item} value={item}>
-                        {item}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={customCategory}
-                    onChange={(e) => setCustomCategory(e.target.value)}
-                    className="w-full border rounded-xl p-3"
-                    placeholder="Custom category"
-                  />
-                )}
+                <label className="mb-2 block text-sm font-medium">Category</label>
+                <input
+                  type="text"
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  className="w-full rounded-xl border p-3"
+                />
               </div>
 
-              <div className="flex items-end">
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={useCustomCategory}
-                    onChange={(e) => setUseCustomCategory(e.target.checked)}
-                  />
-                  Use custom category
-                </label>
-              </div>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
               <div>
-                <label className="block text-sm font-medium mb-2">Amount</label>
+                <label className="mb-2 block text-sm font-medium">Amount</label>
                 <input
                   type="number"
                   min={0}
                   value={amount}
                   onChange={(e) => setAmount(Number(e.target.value))}
-                  className="w-full border rounded-xl p-3"
-                  placeholder="0"
+                  className="w-full rounded-xl border p-3"
                 />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-2">
-                  Payment Method
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod("cash")}
-                    className={`rounded-xl border px-4 py-3 font-medium ${
-                      paymentMethod === "cash"
-                        ? "bg-slate-900 text-white border-slate-900"
-                        : "bg-white text-slate-700 border-slate-300"
-                    }`}
-                  >
-                    Cash
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod("card")}
-                    className={`rounded-xl border px-4 py-3 font-medium ${
-                      paymentMethod === "card"
-                        ? "bg-slate-900 text-white border-slate-900"
-                        : "bg-white text-slate-700 border-slate-300"
-                    }`}
-                  >
-                    Card
-                  </button>
-                </div>
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-2">Notes</label>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                className="w-full border rounded-xl p-3 min-h-[110px]"
-                placeholder="Optional note"
+              <label className="mb-2 block text-sm font-medium">Description</label>
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full rounded-xl border p-3"
+                placeholder="Rent, electricity, transport..."
               />
             </div>
 
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-sm font-medium">Payment Method</label>
+                <select
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value as "cash" | "card")}
+                  className="w-full rounded-xl border p-3"
+                >
+                  <option value="cash">Cash</option>
+                  <option value="card">Card</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">Current Shift</label>
+                <input
+                  type="text"
+                  value={paymentMethod === "cash" ? `#${currentShift?.id ?? "No open shift"}` : "Not required"}
+                  disabled
+                  className="w-full rounded-xl border bg-slate-50 p-3 text-slate-600"
+                />
+              </div>
+            </div>
+
             <button
-              onClick={handleSave}
-              className="w-full rounded-xl bg-red-600 px-4 py-3 font-semibold text-white hover:bg-red-700"
+              onClick={handleCreate}
+              disabled={saving}
+              className="rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white disabled:opacity-60"
             >
-              Save Expense
+              {saving ? "Saving..." : "Save Expense"}
             </button>
           </div>
         </section>
 
-        <section className="bg-white rounded-2xl shadow overflow-hidden">
-          <div className="p-5 border-b flex items-center justify-between gap-3">
+        <section className="rounded-2xl bg-white p-6 shadow">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-xl font-bold">Expense History</h2>
-              <p className="text-sm text-slate-500 mt-1">
-                All recorded cash out and expenses
+              <p className="mt-1 text-sm text-slate-500">
+                Search and filter expense records
               </p>
             </div>
 
-            <div className="w-72">
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search expense..."
-                className="w-full border rounded-xl p-3"
-              />
+            <div className="flex gap-3">
+              <select
+                value={filterMethod}
+                onChange={(e) => setFilterMethod(e.target.value as "all" | "cash" | "card")}
+                className="rounded-xl border p-3"
+              >
+                <option value="all">All</option>
+                <option value="cash">Cash</option>
+                <option value="card">Card</option>
+              </select>
             </div>
           </div>
 
-          <div className="max-h-[72vh] overflow-auto">
+          <div className="mt-4">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search number, category, description..."
+              className="w-full rounded-xl border p-3"
+            />
+          </div>
+
+          <div className="mt-5 max-h-[42rem] space-y-3 overflow-auto pr-1">
             {filteredExpenses.length === 0 ? (
-              <div className="p-6 text-slate-500">No expenses found</div>
+              <div className="rounded-xl border border-dashed p-6 text-center text-slate-500">
+                No expenses found
+              </div>
             ) : (
               filteredExpenses.map((expense) => (
-                <div key={expense.id} className="border-b p-5">
-                  <div className="flex items-start justify-between gap-4">
+                <div key={expense.id} className="rounded-xl border p-4">
+                  <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="font-semibold">{expense.title}</div>
-                      <div className="text-xs text-slate-500 mt-1">
-                        {expense.expenseNumber} • {expense.category} •{" "}
-                        {expense.createdBy}
+                      <div className="font-semibold">{expense.expenseNumber}</div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {expense.category} • {expense.createdBy}
                       </div>
-                      <div className="text-xs text-slate-500 mt-1">
+                      <div className="mt-1 text-xs text-slate-500">
                         {formatDate(expense.expenseDate)}
                       </div>
-                      {expense.notes && (
-                        <div className="text-sm text-slate-600 mt-2">
-                          {expense.notes}
-                        </div>
-                      )}
                     </div>
 
                     <div className="text-right">
-                      <div
-                        className={`text-lg font-bold ${
-                          expense.paymentMethod === "cash"
-                            ? "text-red-600"
-                            : "text-blue-600"
-                        }`}
-                      >
-                        -{formatMoney(expense.amount)}
+                      <div className="font-semibold">
+                        {formatMoney(expense.amount, settings.currencySymbol)}
                       </div>
-                      <div className="text-xs text-slate-500 mt-1">
+                      <div className="mt-1 text-xs text-slate-500">
                         {expense.paymentMethod.toUpperCase()}
                       </div>
-
-                      <button
-                        onClick={() => handleDelete(expense.id)}
-                        className="mt-3 text-xs font-medium text-red-600 hover:underline"
-                      >
-                        Delete
-                      </button>
                     </div>
                   </div>
+
+                  <div className="mt-3 text-sm text-slate-600">
+                    {expense.description}
+                  </div>
+
+                  {expense.shiftId !== null && (
+                    <div className="mt-2 text-xs text-slate-500">
+                      Shift #{expense.shiftId}
+                    </div>
+                  )}
                 </div>
               ))
             )}

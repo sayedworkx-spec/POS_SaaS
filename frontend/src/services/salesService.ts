@@ -1,51 +1,24 @@
-import { getProducts, updateProductStock } from "./productService";
-import { saveInventoryMovement } from "./inventoryMovementService";
+import { apiFetch, readApiError } from "./api";
 import type { Sale } from "../types/Sale";
 
-const SALES_KEY = "sales";
+const SALES_CACHE_KEY = "sales";
+
+type SaleItem = Sale["items"][number];
+type SalePayload = Omit<Sale, "id">;
 
 function normalizeSale(raw: any): Sale {
-  const products = getProducts();
-
   const items = Array.isArray(raw?.items)
-    ? raw.items.map((item: any) => {
-        const product =
-          products.find((p) => p.id === Number(item?.productId)) ?? null;
-
-        const productId = Number(item?.productId ?? 0);
-        const sku = String(item?.sku ?? product?.sku ?? "").trim();
-        const name = String(item?.name ?? product?.name ?? "").trim();
-        const quantity = Number(item?.quantity ?? 0);
-        const unitPrice = Number(item?.unitPrice ?? 0);
-        const costPrice = Number(item?.costPrice ?? product?.costPrice ?? 0);
-        const lineTotal = Number(item?.lineTotal ?? unitPrice * quantity);
-        const costTotal = Number(item?.costTotal ?? costPrice * quantity);
-
-        return {
-          productId,
-          sku,
-          name,
-          quantity,
-          unitPrice,
-          costPrice,
-          lineTotal,
-          costTotal,
-        };
-      })
+    ? raw.items.map((item: any) => ({
+        productId: Number(item?.productId ?? 0),
+        sku: String(item?.sku ?? "").trim(),
+        name: String(item?.name ?? "").trim(),
+        quantity: Number(item?.quantity ?? 0),
+        unitPrice: Number(item?.unitPrice ?? 0),
+        costPrice: Number(item?.costPrice ?? 0),
+        lineTotal: Number(item?.lineTotal ?? 0),
+        costTotal: Number(item?.costTotal ?? 0),
+      }))
     : [];
-
-  const subtotal = Number(
-    raw?.subtotal ??
-      items.reduce((sum: number, item: any) => sum + item.lineTotal, 0)
-  );
-
-  const costTotal = Number(
-    raw?.costTotal ??
-      items.reduce((sum: number, item: any) => sum + item.costTotal, 0)
-  );
-
-  const discountAmount = Number(raw?.discountAmount ?? 0);
-  const total = Number(raw?.total ?? subtotal - discountAmount);
 
   return {
     id: Number(raw?.id ?? Date.now()),
@@ -54,108 +27,103 @@ function normalizeSale(raw: any): Sale {
     cashier: String(raw?.cashier ?? "Cashier"),
     shiftId: Number(raw?.shiftId ?? 0),
     paymentMethod: raw?.paymentMethod === "card" ? "card" : "cash",
-    subtotal,
-    costTotal,
-    profit: Number(raw?.profit ?? total - costTotal),
+    subtotal: Number(raw?.subtotal ?? 0),
+    costTotal: Number(raw?.costTotal ?? 0),
+    profit: Number(raw?.profit ?? 0),
     discountPercent: Number(raw?.discountPercent ?? 0),
-    discountAmount,
-    total,
+    discountAmount: Number(raw?.discountAmount ?? 0),
+    total: Number(raw?.total ?? 0),
     cashReceived: Number(raw?.cashReceived ?? 0),
     change: Number(raw?.change ?? 0),
     items,
   };
 }
 
-function readSales(): Sale[] {
-  const raw = localStorage.getItem(SALES_KEY);
+function readCache(): Sale[] {
+  const raw = localStorage.getItem(SALES_CACHE_KEY);
 
-  if (!raw) {
-    localStorage.setItem(SALES_KEY, JSON.stringify([]));
-    return [];
-  }
+  if (!raw) return [];
 
   try {
-    const parsed = JSON.parse(raw) as any[];
-    const normalized = Array.isArray(parsed) ? parsed.map(normalizeSale) : [];
-    localStorage.setItem(SALES_KEY, JSON.stringify(normalized));
-    return normalized;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => normalizeSale(item));
   } catch {
-    localStorage.setItem(SALES_KEY, JSON.stringify([]));
     return [];
   }
 }
 
-function writeSales(sales: Sale[]) {
-  localStorage.setItem(SALES_KEY, JSON.stringify(sales));
+function writeCache(sales: Sale[]) {
+  localStorage.setItem(SALES_CACHE_KEY, JSON.stringify(sales));
+}
+
+function upsertCache(sale: Sale) {
+  const current = readCache();
+  const index = current.findIndex((item) => item.id === sale.id);
+
+  if (index === -1) {
+    current.unshift(sale);
+  } else {
+    current[index] = sale;
+  }
+
+  writeCache(current);
 }
 
 export function getSales(): Sale[] {
-  return readSales();
+  return readCache();
 }
 
 export function getSaleByInvoiceNumber(invoiceNumber: string): Sale | null {
-  const sales = readSales();
-  return sales.find((sale) => sale.invoiceNumber === invoiceNumber) ?? null;
+  return readCache().find((sale) => sale.invoiceNumber === invoiceNumber) ?? null;
 }
 
-export function addSale(sale: Omit<Sale, "id">) {
-  const products = getProducts();
+export async function syncSalesCache() {
+  const response = await apiFetch("/sales");
 
-  const items = sale.items.map((item) => {
-    const product = products.find((p) => p.id === item.productId);
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
 
-    if (!product) {
-      throw new Error(`Product not found: ${item.name}`);
-    }
+  const payload = (await response.json()) as { sales?: unknown };
 
-    if (product.stock < item.quantity) {
-      throw new Error(`Not enough stock for ${product.name}`);
-    }
+  const sales = Array.isArray(payload.sales)
+    ? payload.sales.map((item) => normalizeSale(item))
+    : [];
 
-    return {
-      ...item,
-      costPrice: Number(item.costPrice ?? product.costPrice),
-      costTotal: Number(
-        item.costTotal ??
-          Number(item.costPrice ?? product.costPrice) * item.quantity
-      ),
-    };
+  writeCache(sales);
+  return sales;
+}
+
+export const fetchSales = syncSalesCache;
+
+export async function fetchSaleByInvoiceNumber(invoiceNumber: string) {
+  const response = await apiFetch(`/sales/${encodeURIComponent(invoiceNumber)}`);
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { sale?: unknown };
+  const sale = normalizeSale(payload.sale);
+
+  upsertCache(sale);
+  return sale;
+}
+
+export async function addSale(sale: SalePayload) {
+  const response = await apiFetch("/sales", {
+    method: "POST",
+    body: JSON.stringify(sale),
   });
 
-  let computedCostTotal = 0;
-  for (const item of items) {
-    computedCostTotal += item.costTotal;
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
 
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
+  const payload = (await response.json()) as { sale?: unknown };
+  const saved = normalizeSale(payload.sale);
 
-    updateProductStock(item.productId, -item.quantity);
-
-    saveInventoryMovement({
-      id: Date.now() + item.productId + index,
-      productId: item.productId,
-      movementType: "OUT",
-      quantity: item.quantity,
-      movementDate: sale.saleDate,
-    });
-  }
-
-  const sales = readSales();
-
-  const finalCostTotal = sale.costTotal ?? computedCostTotal;
-  const finalProfit = sale.profit ?? sale.total - finalCostTotal;
-
-  const newSale: Sale = {
-    id: Date.now(),
-    ...sale,
-    costTotal: finalCostTotal,
-    profit: finalProfit,
-    items,
-  };
-
-  sales.push(newSale);
-  writeSales(sales);
-
-  return newSale;
+  upsertCache(saved);
+  return saved;
 }

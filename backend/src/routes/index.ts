@@ -1,0 +1,33 @@
+import { Router } from "express";
+
+import { authRouter } from "./auth.js";
+import { healthRouter } from "./health.js";
+import { usersRouter } from "./users.js";
+import { productsRouter } from "./products.js";
+import { salesRouter } from "./sales.js";
+import { cashRegisterRouter } from "./cash-register.js";
+import { returnsRouter } from "./returns.js";
+import { auditLogsRouter } from "./audit-logs.js";
+import { dashboardRouter } from "./dashboard.js";
+import { profitReportRouter } from "./profit-report.js";
+import { expensesRouter } from "./expenses.js";
+import { inventoryValuationRouter } from "./inventory-valuation.js";
+import { pnlReportRouter } from "./pnl-report.js";
+import { executiveSummaryRouter } from "./executive-summary.js";
+
+export const apiRouter = Router();
+
+apiRouter.use("/health", healthRouter);
+apiRouter.use("/auth", authRouter);
+apiRouter.use("/users", usersRouter);
+apiRouter.use("/products", productsRouter);
+apiRouter.use("/sales", salesRouter);
+apiRouter.use("/cash-register", cashRegisterRouter);
+apiRouter.use("/returns", returnsRouter);
+apiRouter.use("/audit-logs", auditLogsRouter);
+apiRouter.use("/dashboard", dashboardRouter);
+apiRouter.use("/profit-report", profitReportRouter);
+apiRouter.use("/expenses", expensesRouter);
+apiRouter.use("/inventory-valuation", inventoryValuationRouter);
+apiRouter.use("/pnl-report", pnlReportRouter);
+apiRouter.use("/executive-summary", executiveSummaryRouter);

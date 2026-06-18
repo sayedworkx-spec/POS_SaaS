@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 
 import MainLayout from "../layouts/MainLayout";
+import { addAuditLog } from "../services/auditService";
 import { getCurrentUser } from "../services/authService";
-import { getSales } from "../services/salesService";
-import {
-  createReturn,
-  getReturnableQuantityForItem,
-  getReturns,
-} from "../services/returnService";
+import { getSettings } from "../services/settingsService";
+import { fetchSaleByInvoiceNumber, syncSalesCache } from "../services/salesService";
+import { syncProductsCache } from "../services/productsApi";
+import { syncCashRegisterCache } from "../services/cashRegisterService";
+import { createReturn, getReturns, getReturnsBySaleId, syncReturnsCache } from "../services/returnsService";
 
 import type { Sale } from "../types/Sale";
-import type { SaleReturn } from "../types/Return";
+import type { SalesReturn } from "../types/Return";
 
-function formatMoney(value: number) {
-  return new Intl.NumberFormat("en-US", {
+function formatMoney(value: number, currencySymbol: string) {
+  return `${currencySymbol}${new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 0,
-  }).format(value);
+  }).format(value)}`;
 }
 
 function formatDate(value: string) {
@@ -25,199 +25,229 @@ function formatDate(value: string) {
   });
 }
 
+type ReturnQtyMap = Record<number, number>;
+
 export default function ReturnsPage() {
   const currentUser = getCurrentUser();
+  const settings = getSettings();
 
-  const [version, setVersion] = useState(0);
+  const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [sale, setSale] = useState<Sale | null>(null);
+  const [returns, setReturns] = useState<SalesReturn[]>(() => getReturns());
+  const [returnQtyMap, setReturnQtyMap] = useState<ReturnQtyMap>({});
+  const [refundMethod, setRefundMethod] = useState<"cash" | "card">("cash");
+  const [reason, setReason] = useState("Customer returned items");
   const [search, setSearch] = useState("");
-  const [selectedInvoiceNumber, setSelectedInvoiceNumber] = useState("");
-  const [reason, setReason] = useState("");
-  const [returnQtyByProductId, setReturnQtyByProductId] = useState<
-    Record<number, number>
-  >({});
-  const [message, setMessage] = useState("");
+  const [loadingSale, setLoadingSale] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
-  const sales = useMemo(() => getSales().slice().reverse(), [version]);
-  const returns = useMemo(() => getReturns().slice().reverse(), [version]);
+  async function refreshReturns() {
+    try {
+      const fresh = await syncReturnsCache();
+      setReturns(fresh);
+    } catch {
+      setReturns(getReturns());
+    }
+  }
 
-  const filteredSales = useMemo(() => {
+  useEffect(() => {
+    void refreshReturns();
+  }, []);
+
+  const currentSaleReturns = useMemo(() => {
+    if (!sale) return [];
+    return getReturnsBySaleId(sale.id);
+  }, [sale, returns]);
+
+  const refundableRows = useMemo(() => {
+    if (!sale) return [];
+
+    const returnedByProduct = new Map<number, number>();
+    for (const ret of currentSaleReturns) {
+      for (const item of ret.items) {
+        returnedByProduct.set(
+          item.productId,
+          (returnedByProduct.get(item.productId) ?? 0) + item.quantity
+        );
+      }
+    }
+
+    return sale.items.map((item) => {
+      const alreadyReturned = returnedByProduct.get(item.productId) ?? 0;
+      const available = Math.max(0, item.quantity - alreadyReturned);
+      const selected = returnQtyMap[item.productId] ?? 0;
+
+      return {
+        ...item,
+        alreadyReturned,
+        available,
+        selected,
+      };
+    });
+  }, [sale, currentSaleReturns, returnQtyMap]);
+
+  const refundSubtotal = useMemo(() => {
+    return refundableRows.reduce(
+      (sum, row) => sum + row.selected * row.unitPrice,
+      0
+    );
+  }, [refundableRows]);
+
+  const filteredReturns = useMemo(() => {
     const term = search.trim().toLowerCase();
 
     if (!term) {
-      return sales;
+      return returns;
     }
 
-    return sales.filter((sale) => {
-      const itemMatch = sale.items.some(
-        (item) =>
-          item.name.toLowerCase().includes(term) ||
-          item.sku.toLowerCase().includes(term)
-      );
-
+    return returns.filter((item) => {
       return (
-        sale.invoiceNumber.toLowerCase().includes(term) ||
-        sale.cashier.toLowerCase().includes(term) ||
-        sale.paymentMethod.toLowerCase().includes(term) ||
-        itemMatch
+        item.returnNumber.toLowerCase().includes(term) ||
+        item.invoiceNumber.toLowerCase().includes(term) ||
+        item.cashier.toLowerCase().includes(term) ||
+        item.reason.toLowerCase().includes(term) ||
+        item.refundMethod.toLowerCase().includes(term) ||
+        item.items.some(
+          (line) =>
+            line.name.toLowerCase().includes(term) ||
+            line.sku.toLowerCase().includes(term)
+        )
       );
     });
-  }, [sales, search]);
+  }, [returns, search]);
 
-  useEffect(() => {
-    if (filteredSales.length === 0) {
-      setSelectedInvoiceNumber("");
-      return;
-    }
+  const stats = useMemo(() => {
+    const returnsCount = returns.length;
+    const totalRefunds = returns.reduce((sum, item) => sum + item.refundAmount, 0);
+    const cashRefunds = returns.filter((item) => item.refundMethod === "cash").length;
 
-    const currentExists = filteredSales.some(
-      (sale) => sale.invoiceNumber === selectedInvoiceNumber
-    );
-
-    if (!currentExists) {
-      setSelectedInvoiceNumber(filteredSales[0].invoiceNumber);
-    }
-  }, [filteredSales, selectedInvoiceNumber]);
-
-  const selectedSale: Sale | null =
-    filteredSales.find((sale) => sale.invoiceNumber === selectedInvoiceNumber) ??
-    null;
-
-  useEffect(() => {
-    if (!selectedSale) {
-      setReturnQtyByProductId({});
-      return;
-    }
-
-    const next: Record<number, number> = {};
-
-    selectedSale.items.forEach((item) => {
-      next[item.productId] = getReturnableQuantityForItem(
-        selectedSale,
-        item.productId
-      );
-    });
-
-    setReturnQtyByProductId(next);
-    setReason("");
-    setMessage("");
-  }, [selectedSale?.invoiceNumber]);
-
-  const totalReturnable = useMemo(() => {
-    if (!selectedSale) return 0;
-
-    return selectedSale.items.reduce(
-      (sum, item) =>
-        sum + getReturnableQuantityForItem(selectedSale, item.productId),
-      0
-    );
-  }, [selectedSale]);
-
-  const refundAmount = useMemo(() => {
-    if (!selectedSale) return 0;
-
-    return selectedSale.items.reduce((sum, item) => {
-      const qty = Number(returnQtyByProductId[item.productId] ?? 0);
-      return sum + item.unitPrice * Math.max(0, qty);
-    }, 0);
-  }, [selectedSale, returnQtyByProductId]);
-
-  const costAmount = useMemo(() => {
-    if (!selectedSale) return 0;
-
-    return selectedSale.items.reduce((sum, item) => {
-      const qty = Number(returnQtyByProductId[item.productId] ?? 0);
-      return sum + item.costPrice * Math.max(0, qty);
-    }, 0);
-  }, [selectedSale, returnQtyByProductId]);
-
-  const profitImpact = refundAmount - costAmount;
-
-  const todayReturns = useMemo(() => {
-    const today = new Date().toDateString();
-
-    return returns.filter(
-      (record) => new Date(record.returnDate).toDateString() === today
-    );
+    return { returnsCount, totalRefunds, cashRefunds };
   }, [returns]);
 
-  const monthReturns = useMemo(() => {
-    const now = new Date();
+  async function loadSale() {
+    const trimmed = invoiceNumber.trim();
 
-    return returns.filter((record) => {
-      const date = new Date(record.returnDate);
-      return (
-        date.getFullYear() === now.getFullYear() &&
-        date.getMonth() === now.getMonth()
-      );
-    });
-  }, [returns]);
-
-  const todayRefundTotal = useMemo(
-    () => todayReturns.reduce((sum, item) => sum + item.refundAmount, 0),
-    [todayReturns]
-  );
-
-  const monthRefundTotal = useMemo(
-    () => monthReturns.reduce((sum, item) => sum + item.refundAmount, 0),
-    [monthReturns]
-  );
-
-  function refresh() {
-    setVersion((current) => current + 1);
-  }
-
-  function setAllReturnQuantitiesToMax() {
-    if (!selectedSale) return;
-
-    const next: Record<number, number> = {};
-
-    selectedSale.items.forEach((item) => {
-      next[item.productId] = getReturnableQuantityForItem(
-        selectedSale,
-        item.productId
-      );
-    });
-
-    setReturnQtyByProductId(next);
-  }
-
-  function clearReturnQuantities() {
-    if (!selectedSale) return;
-
-    const next: Record<number, number> = {};
-
-    selectedSale.items.forEach((item) => {
-      next[item.productId] = 0;
-    });
-
-    setReturnQtyByProductId(next);
-  }
-
-  function handleProcessReturn() {
-    if (!selectedSale) {
-      alert("Select a sale first");
+    if (!trimmed) {
+      setError("Enter an invoice number");
       return;
     }
 
     try {
-      const items = selectedSale.items
-        .map((item) => ({
-          productId: item.productId,
-          quantity: Number(returnQtyByProductId[item.productId] ?? 0),
-        }))
-        .filter((item) => item.quantity > 0);
+      setLoadingSale(true);
+      setError("");
 
-      const result = createReturn({
-        originalInvoiceNumber: selectedSale.invoiceNumber,
+      const fetched = await fetchSaleByInvoiceNumber(trimmed);
+      setSale(fetched);
+      setReason(`Return for ${fetched.invoiceNumber}`);
+      setRefundMethod("cash");
+
+      const initialQty: ReturnQtyMap = {};
+      for (const item of fetched.items) {
+        initialQty[item.productId] = 0;
+      }
+      setReturnQtyMap(initialQty);
+    } catch (err) {
+      setSale(null);
+      setError(err instanceof Error ? err.message : "Unable to load invoice");
+    } finally {
+      setLoadingSale(false);
+    }
+  }
+
+  function setRowQty(productId: number, value: number, max: number) {
+    const nextValue = Math.max(0, Math.min(max, Number.isFinite(value) ? value : 0));
+    setReturnQtyMap((current) => ({
+      ...current,
+      [productId]: nextValue,
+    }));
+  }
+
+  function setAllRemaining() {
+    if (!sale) return;
+
+    const next: ReturnQtyMap = {};
+    for (const row of refundableRows) {
+      next[row.productId] = row.available;
+    }
+    setReturnQtyMap(next);
+  }
+
+  function clearSelected() {
+    if (!sale) return;
+
+    const next: ReturnQtyMap = {};
+    for (const row of refundableRows) {
+      next[row.productId] = 0;
+    }
+    setReturnQtyMap(next);
+  }
+
+  async function handleCreateReturn() {
+    if (!sale) {
+      setError("Load a sale first");
+      return;
+    }
+
+    const items = refundableRows
+      .filter((row) => row.selected > 0)
+      .map((row) => ({
+        productId: row.productId,
+        sku: row.sku,
+        name: row.name,
+        quantity: row.selected,
+        unitPrice: row.unitPrice,
+        refundTotal: row.selected * row.unitPrice,
+      }));
+
+    if (items.length === 0) {
+      setError("Select at least one item to return");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+
+      const returnNumber = `RET-${Date.now().toString().slice(-6)}`;
+
+      const saved = await createReturn({
+        returnNumber,
+        returnDate: new Date().toISOString(),
+        saleId: sale.id,
+        invoiceNumber: sale.invoiceNumber,
+        cashier: currentUser?.name ?? sale.cashier,
         reason,
-        createdBy: currentUser?.name ?? "Admin",
+        refundMethod,
+        subtotal: refundSubtotal,
+        refundAmount: refundSubtotal,
         items,
       });
 
-      setMessage(`Return processed: ${result.returnNumber}`);
-      refresh();
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Unable to process return");
+      addAuditLog(
+        "SALE_RETURN_CREATED",
+        `Return ${saved.returnNumber} against ${sale.invoiceNumber}`,
+        currentUser?.name ?? "Cashier"
+      );
+
+      await Promise.allSettled([
+        syncReturnsCache(),
+        syncProductsCache(),
+        syncSalesCache(),
+        syncCashRegisterCache(),
+      ]);
+
+      setReturns(getReturns());
+      setSale(null);
+      setInvoiceNumber("");
+      setReturnQtyMap({});
+      setReason("Customer returned items");
+      setRefundMethod("cash");
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to create return");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -225,288 +255,264 @@ export default function ReturnsPage() {
     <MainLayout>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between mb-6">
         <div>
-          <h1 className="text-3xl font-bold">Returns / Refunds</h1>
+          <h1 className="text-3xl font-bold">Returns</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Reverse stock and record refund against an invoice
+            Load an invoice, choose quantities, and create a return
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-white rounded-xl shadow px-4 py-3">
-            <div className="text-xs text-slate-500">Today Refunds</div>
-            <div className="text-2xl font-bold mt-1 text-red-600">
-              {formatMoney(todayRefundTotal)}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="rounded-2xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Returns</div>
+            <div className="mt-1 text-2xl font-bold">{stats.returnsCount}</div>
+          </div>
+
+          <div className="rounded-2xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Refunds</div>
+            <div className="mt-1 text-2xl font-bold">
+              {formatMoney(stats.totalRefunds, settings.currencySymbol)}
             </div>
           </div>
 
-          <div className="bg-white rounded-xl shadow px-4 py-3">
-            <div className="text-xs text-slate-500">Month Refunds</div>
-            <div className="text-2xl font-bold mt-1 text-red-600">
-              {formatMoney(monthRefundTotal)}
-            </div>
+          <div className="rounded-2xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Cash Returns</div>
+            <div className="mt-1 text-2xl font-bold">{stats.cashRefunds}</div>
           </div>
         </div>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <section className="bg-white rounded-2xl shadow overflow-hidden">
-          <div className="p-4 border-b">
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by invoice, cashier, SKU, or item name..."
-              className="w-full border rounded-xl p-3"
-            />
-          </div>
+      {error && (
+        <div className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
-          <div className="max-h-[78vh] overflow-auto">
-            {filteredSales.length === 0 ? (
-              <div className="p-6 text-slate-500">No sales found</div>
-            ) : (
-              filteredSales.map((sale) => {
-                const isSelected =
-                  selectedInvoiceNumber === sale.invoiceNumber;
-
-                return (
-                  <button
-                    key={sale.id}
-                    onClick={() => setSelectedInvoiceNumber(sale.invoiceNumber)}
-                    className={`w-full text-left p-4 border-b hover:bg-slate-50 transition ${
-                      isSelected ? "bg-slate-100" : ""
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-semibold">
-                          {sale.invoiceNumber}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          {sale.cashier} • {formatDate(sale.saleDate)}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          {sale.paymentMethod.toUpperCase()} •{" "}
-                          {sale.items.length} items
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <div className="font-semibold">
-                          {formatMoney(sale.total)}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          Profit {formatMoney(sale.profit)}
-                        </div>
-                      </div>
-                    </div>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </section>
-
+      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
         <section className="space-y-6">
-          <div className="bg-white rounded-2xl shadow p-6">
-            {!selectedSale ? (
-              <div className="text-slate-500">
-                Select a sale to process a return.
+          <div className="rounded-2xl bg-white p-6 shadow">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+              <div className="flex-1">
+                <label className="mb-2 block text-sm font-medium">
+                  Invoice Number
+                </label>
+                <input
+                  type="text"
+                  value={invoiceNumber}
+                  onChange={(e) => setInvoiceNumber(e.target.value)}
+                  className="w-full rounded-xl border p-3"
+                  placeholder="INV-123456"
+                />
               </div>
-            ) : (
-              <>
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between mb-5">
-                  <div>
-                    <h2 className="text-2xl font-bold">
-                      {selectedSale.invoiceNumber}
-                    </h2>
-                    <div className="text-sm text-slate-500 mt-1">
-                      {formatDate(selectedSale.saleDate)}
-                    </div>
-                    <div className="text-sm text-slate-500 mt-1">
-                      Cashier: {selectedSale.cashier} • Payment:{" "}
-                      {selectedSale.paymentMethod.toUpperCase()}
-                    </div>
-                  </div>
 
-                  <div className="text-sm text-slate-500">
-                    Returnable items: {totalReturnable}
-                  </div>
+              <button
+                onClick={loadSale}
+                disabled={loadingSale}
+                className="rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white disabled:opacity-60"
+              >
+                {loadingSale ? "Loading..." : "Load Sale"}
+              </button>
+            </div>
+          </div>
+
+          {!sale ? (
+            <div className="rounded-2xl bg-white p-6 shadow text-slate-500">
+              Load a sale to start a return.
+            </div>
+          ) : (
+            <div className="rounded-2xl bg-white p-6 shadow">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold">{sale.invoiceNumber}</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {sale.cashier} • {formatDate(sale.saleDate)}
+                  </p>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Original Total: {formatMoney(sale.total, settings.currencySymbol)}
+                  </p>
                 </div>
 
-                <div className="flex flex-wrap gap-3 mb-5">
-                  <button
-                    type="button"
-                    onClick={setAllReturnQuantitiesToMax}
-                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white"
+                <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm">
+                  <div className="text-slate-500">Return Subtotal</div>
+                  <div className="mt-1 text-xl font-bold">
+                    {formatMoney(refundSubtotal, settings.currencySymbol)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div>
+                  <label className="mb-2 block text-sm font-medium">Reason</label>
+                  <input
+                    type="text"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    className="w-full rounded-xl border p-3"
+                    placeholder="Reason for return"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-medium">
+                    Refund Method
+                  </label>
+                  <select
+                    value={refundMethod}
+                    onChange={(e) => setRefundMethod(e.target.value as "cash" | "card")}
+                    className="w-full rounded-xl border p-3"
                   >
-                    Full Return
+                    <option value="cash">Cash</option>
+                    <option value="card">Card</option>
+                  </select>
+                </div>
+
+                <div className="flex items-end gap-3">
+                  <button
+                    onClick={setAllRemaining}
+                    className="rounded-xl border px-4 py-3 font-semibold"
+                  >
+                    Max Remaining
                   </button>
 
                   <button
-                    type="button"
-                    onClick={clearReturnQuantities}
-                    className="rounded-xl border px-4 py-2 text-sm font-medium"
+                    onClick={clearSelected}
+                    className="rounded-xl border px-4 py-3 font-semibold"
                   >
                     Clear
                   </button>
                 </div>
+              </div>
 
-                <div className="space-y-3 mb-6">
-                  {selectedSale.items.map((item) => {
-                    const available = getReturnableQuantityForItem(
-                      selectedSale,
-                      item.productId
-                    );
-
-                    return (
-                      <div
-                        key={`${selectedSale.id}-${item.productId}`}
-                        className="rounded-xl border p-4"
-                      >
-                        <div className="flex items-start justify-between gap-3 mb-3">
-                          <div>
-                            <div className="font-semibold">{item.name}</div>
-                            <div className="text-xs text-slate-500 mt-1">
-                              {item.sku} • Sold {item.quantity} • Available{" "}
-                              {available}
-                            </div>
+              <div className="mt-6 overflow-hidden rounded-2xl border">
+                <table className="w-full">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="p-4 text-left">Item</th>
+                      <th className="p-4 text-left">Sold</th>
+                      <th className="p-4 text-left">Returned</th>
+                      <th className="p-4 text-left">Remaining</th>
+                      <th className="p-4 text-left">Qty to Return</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {refundableRows.map((row) => (
+                      <tr key={row.productId} className="border-t">
+                        <td className="p-4">
+                          <div className="font-semibold">{row.name}</div>
+                          <div className="text-xs text-slate-500">
+                            {row.sku}
                           </div>
+                        </td>
+                        <td className="p-4">{row.quantity}</td>
+                        <td className="p-4">{row.alreadyReturned}</td>
+                        <td className="p-4 font-semibold">{row.available}</td>
+                        <td className="p-4">
+                          <input
+                            type="number"
+                            min={0}
+                            max={row.available}
+                            value={row.selected}
+                            onChange={(e) =>
+                              setRowQty(row.productId, Number(e.target.value), row.available)
+                            }
+                            className="w-28 rounded-xl border p-3"
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
-                          <div className="text-right text-sm text-slate-500">
-                            {formatMoney(item.unitPrice)} / unit
-                          </div>
-                        </div>
-
-                        <div className="grid gap-3 md:grid-cols-[1fr_auto] items-end">
-                          <div>
-                            <label className="block text-sm font-medium mb-2">
-                              Return Qty
-                            </label>
-                            <input
-                              type="number"
-                              min={0}
-                              max={available}
-                              value={returnQtyByProductId[item.productId] ?? 0}
-                              onChange={(e) =>
-                                setReturnQtyByProductId((current) => ({
-                                  ...current,
-                                  [item.productId]: Math.min(
-                                    available,
-                                    Math.max(0, Number(e.target.value))
-                                  ),
-                                }))
-                              }
-                              className="w-full border rounded-xl p-3"
-                            />
-                          </div>
-
-                          <div className="rounded-xl bg-slate-50 p-3">
-                            <div className="text-xs text-slate-500">Refund</div>
-                            <div className="font-semibold mt-1">
-                              {formatMoney(
-                                item.unitPrice *
-                                  (returnQtyByProductId[item.productId] ?? 0)
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-slate-500">
+                  Return amount will be posted as{" "}
+                  <span className="font-semibold">{refundMethod.toUpperCase()}</span>.
                 </div>
 
-                <div className="space-y-3 rounded-2xl bg-slate-50 p-4">
-                  <div className="flex justify-between text-sm">
-                    <span>Refund Amount</span>
-                    <span>{formatMoney(refundAmount)}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span>Cost Impact</span>
-                    <span>{formatMoney(costAmount)}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span>Profit Impact</span>
-                    <span className="text-red-600">
-                      {formatMoney(profitImpact)}
-                    </span>
-                  </div>
+                <button
+                  onClick={handleCreateReturn}
+                  disabled={saving}
+                  className="rounded-xl bg-red-600 px-5 py-3 font-semibold text-white disabled:opacity-60"
+                >
+                  {saving ? "Creating..." : "Create Return"}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
 
-                  <div>
-                    <label className="block text-sm font-medium mb-2">
-                      Return Reason
-                    </label>
-                    <input
-                      type="text"
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                      className="w-full border rounded-xl p-3"
-                      placeholder="Damaged item, customer changed mind, wrong item..."
-                    />
-                  </div>
+        <aside className="space-y-6">
+          <div className="rounded-2xl bg-white p-6 shadow">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-bold">Recent Returns</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Search and review return history
+                </p>
+              </div>
 
-                  <button
-                    onClick={handleProcessReturn}
-                    className="w-full rounded-xl bg-red-600 px-4 py-3 font-semibold text-white hover:bg-red-700"
-                  >
-                    Process Return
-                  </button>
-
-                  {message && (
-                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
-                      {message}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="bg-white rounded-2xl shadow overflow-hidden">
-            <div className="p-5 border-b">
-              <h2 className="text-xl font-bold">Recent Returns</h2>
-              <p className="text-sm text-slate-500 mt-1">
-                Latest processed refunds and stock reversals
-              </p>
+              <span className="text-xs text-slate-500">
+                {filteredReturns.length} records
+              </span>
             </div>
 
-            <div className="max-h-[24rem] overflow-auto">
-              {returns.length === 0 ? (
-                <div className="p-6 text-slate-500">No returns yet</div>
+            <div className="mt-4">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full rounded-xl border p-3"
+                placeholder="Search return number, invoice, SKU, or reason..."
+              />
+            </div>
+
+            <div className="mt-5 max-h-[44rem] space-y-3 overflow-auto pr-1">
+              {filteredReturns.length === 0 ? (
+                <div className="rounded-xl border border-dashed p-6 text-center text-slate-500">
+                  No returns found
+                </div>
               ) : (
-                returns.map((record: SaleReturn) => (
-                  <div key={record.id} className="border-b p-5">
+                filteredReturns.map((ret) => (
+                  <div key={ret.id} className="rounded-xl border p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="font-semibold">
-                          {record.returnNumber}
+                        <div className="font-semibold">{ret.returnNumber}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Invoice {ret.invoiceNumber}
                         </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          Invoice {record.originalInvoiceNumber} •{" "}
-                          {record.paymentMethod.toUpperCase()}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          {record.reason}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          {formatDate(record.returnDate)}
+                        <div className="mt-1 text-xs text-slate-500">
+                          {ret.cashier} • {formatDate(ret.returnDate)}
                         </div>
                       </div>
 
                       <div className="text-right">
-                        <div className="font-semibold text-red-600">
-                          -{formatMoney(record.refundAmount)}
+                        <div className="font-semibold">
+                          {formatMoney(ret.refundAmount, settings.currencySymbol)}
                         </div>
-                        <div className="text-xs text-slate-500 mt-1">
-                          Profit {formatMoney(record.profitImpact)}
+                        <div className="mt-1 text-xs text-slate-500">
+                          {ret.refundMethod.toUpperCase()}
                         </div>
                       </div>
+                    </div>
+
+                    <div className="mt-3 text-sm text-slate-600">{ret.reason}</div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {ret.items.map((item) => (
+                        <span
+                          key={`${ret.id}-${item.productId}-${item.sku}`}
+                          className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700"
+                        >
+                          {item.sku} × {item.quantity}
+                        </span>
+                      ))}
                     </div>
                   </div>
                 ))
               )}
             </div>
           </div>
-        </section>
+        </aside>
       </div>
     </MainLayout>
   );

@@ -1,97 +1,94 @@
+import { apiFetch, readApiError } from "./api";
 import type { Expense } from "../types/Expense";
-import { addCashMovement, getCurrentShift } from "./cashRegisterService";
 
-const EXPENSES_KEY = "expenses";
+const EXPENSES_CACHE_KEY = "expenses_cache";
 
-const defaultExpenses: Expense[] = [];
+type ExpensePayload = Omit<Expense, "id">;
 
-function readExpenses(): Expense[] {
-  const raw = localStorage.getItem(EXPENSES_KEY);
+function normalizeExpense(raw: any): Expense {
+  return {
+    id: Number(raw?.id ?? Date.now()),
+    expenseNumber: String(raw?.expenseNumber ?? `EXP-${Date.now()}`),
+    expenseDate: String(raw?.expenseDate ?? new Date().toISOString()),
+    category: String(raw?.category ?? ""),
+    description: String(raw?.description ?? ""),
+    amount: Number(raw?.amount ?? 0),
+    paymentMethod: raw?.paymentMethod === "card" ? "card" : "cash",
+    shiftId:
+      raw?.shiftId === null || raw?.shiftId === undefined
+        ? null
+        : Number(raw.shiftId),
+    createdBy: String(raw?.createdBy ?? "System"),
+    createdAt: raw?.createdAt ? String(raw.createdAt) : undefined,
+    updatedAt: raw?.updatedAt ? String(raw.updatedAt) : undefined,
+  };
+}
 
-  if (!raw) {
-    localStorage.setItem(EXPENSES_KEY, JSON.stringify(defaultExpenses));
-    return defaultExpenses;
-  }
+function readCache(): Expense[] {
+  const raw = localStorage.getItem(EXPENSES_CACHE_KEY);
+
+  if (!raw) return [];
 
   try {
-    const parsed = JSON.parse(raw) as any[];
-
-    if (!Array.isArray(parsed)) {
-      localStorage.setItem(EXPENSES_KEY, JSON.stringify(defaultExpenses));
-      return defaultExpenses;
-    }
-
-    const normalized: Expense[] = parsed.map((item) => ({
-      id: Number(item?.id ?? Date.now()),
-      expenseNumber: String(item?.expenseNumber ?? `EXP-${Date.now()}`),
-      expenseDate: String(item?.expenseDate ?? new Date().toISOString()),
-      title: String(item?.title ?? "").trim(),
-      category: String(item?.category ?? "General").trim(),
-      amount: Number(item?.amount ?? 0),
-      paymentMethod: item?.paymentMethod === "card" ? "card" : "cash",
-      notes: String(item?.notes ?? "").trim(),
-      createdBy: String(item?.createdBy ?? "Admin").trim(),
-    }));
-
-    localStorage.setItem(EXPENSES_KEY, JSON.stringify(normalized));
-    return normalized;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => normalizeExpense(item));
   } catch {
-    localStorage.setItem(EXPENSES_KEY, JSON.stringify(defaultExpenses));
-    return defaultExpenses;
+    return [];
   }
 }
 
-function writeExpenses(expenses: Expense[]) {
-  localStorage.setItem(EXPENSES_KEY, JSON.stringify(expenses));
+function writeCache(expenses: Expense[]) {
+  localStorage.setItem(EXPENSES_CACHE_KEY, JSON.stringify(expenses));
+}
+
+function upsertCache(expense: Expense) {
+  const current = readCache();
+  const index = current.findIndex((item) => item.id === expense.id);
+
+  if (index === -1) {
+    current.unshift(expense);
+  } else {
+    current[index] = expense;
+  }
+
+  writeCache(current);
 }
 
 export function getExpenses(): Expense[] {
-  return readExpenses();
+  return readCache();
 }
 
-export function addExpense(input: Omit<Expense, "id" | "expenseNumber">) {
-  if (!input.title.trim()) {
-    throw new Error("Expense title is required");
+export async function syncExpensesCache() {
+  const response = await apiFetch("/expenses");
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
 
-  if (!input.category.trim()) {
-    throw new Error("Expense category is required");
-  }
+  const payload = (await response.json()) as { expenses?: unknown };
 
-  if (input.amount <= 0) {
-    throw new Error("Expense amount must be greater than zero");
-  }
+  const expenses = Array.isArray(payload.expenses)
+    ? payload.expenses.map((item) => normalizeExpense(item))
+    : [];
 
-  if (input.paymentMethod === "cash") {
-    const currentShift = getCurrentShift();
-
-    if (!currentShift) {
-      throw new Error("Open a cash shift before recording a cash expense");
-    }
-
-    addCashMovement("OUT", input.amount, `Expense: ${input.title}`);
-  }
-
-  const expenses = readExpenses();
-
-  const newExpense: Expense = {
-    id: Date.now(),
-    expenseNumber: `EXP-${Date.now().toString().slice(-6)}`,
-    ...input,
-    title: input.title.trim(),
-    category: input.category.trim(),
-    notes: input.notes.trim(),
-    createdBy: input.createdBy.trim(),
-  };
-
-  expenses.push(newExpense);
-  writeExpenses(expenses);
-
-  return newExpense;
+  writeCache(expenses);
+  return expenses;
 }
 
-export function deleteExpense(expenseId: number) {
-  const expenses = readExpenses();
-  const filtered = expenses.filter((expense) => expense.id !== expenseId);
-  writeExpenses(filtered);
+export async function createExpense(payload: ExpensePayload) {
+  const response = await apiFetch("/expenses", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const data = (await response.json()) as { expense?: unknown };
+  const saved = normalizeExpense(data.expense);
+
+  upsertCache(saved);
+  return saved;
 }

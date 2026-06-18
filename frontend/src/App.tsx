@@ -1,42 +1,84 @@
-import {
-  BrowserRouter,
-  Navigate,
-  Route,
-  Routes,
-} from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
-import LoginPage from "./pages/LoginPage";
-import SignupPage from "./pages/SignupPage";
+import { getCurrentUser } from "./services/authService";
+import { canAccessPath } from "./config/access";
+
+import ExecutiveSummaryPage from "./pages/ExecutiveSummaryPage";
 import DashboardPage from "./pages/DashboardPage";
-import ProductsPage from "./pages/ProductsPage";
-import PurchasesPage from "./pages/PurchasesPage";
-import InventoryPage from "./pages/InventoryPage";
-import StockReportPage from "./pages/StockReportPage";
 import SalesPage from "./pages/SalesPage";
-import SalesHistoryPage from "./pages/SalesHistoryPage";
-import ReturnsPage from "./pages/ReturnsPage";
-import BarcodeLabelsPage from "./pages/BarcodeLabelsPage";
 import CashRegisterPage from "./pages/CashRegisterPage";
-import ExpensesPage from "./pages/ExpensesPage";
-import ProfitReportPage from "./pages/ProfitReportPage";
+import ProductsPage from "./pages/ProductsPage";
 import UsersPage from "./pages/UsersPage";
+import ProfitReportPage from "./pages/ProfitReportPage";
+import PnLPage from "./pages/PnLPage";
+import StockReportPage from "./pages/StockReportPage";
+import ExpensesPage from "./pages/ExpensesPage";
+import ReturnsPage from "./pages/ReturnsPage";
 import AuditLogsPage from "./pages/AuditLogsPage";
-import SettingsPage from "./pages/SettingsPage";
-import ReceiptPage from "./pages/ReceiptPage";
+import LoginPage from "./pages/LoginPage";
+import ForbiddenPage from "./pages/ForbiddenPage";
 
-import ProtectedRoute from "./components/ProtectedRoute";
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const user = getCurrentUser();
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <>{children}</>;
+}
+
+function RoleGuard({
+  children,
+  path,
+}: {
+  children: React.ReactNode;
+  path: string;
+}) {
+  const user = getCurrentUser();
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!canAccessPath(user.role, path)) {
+    return <Navigate to="/forbidden" replace />;
+  }
+
+  return <>{children}</>;
+}
+
+function AppHomeRedirect() {
+  const user = getCurrentUser();
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <Navigate to="/home" replace />;
+}
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<LoginPage />} />
-        <Route path="/signup" element={<SignupPage />} />
+        <Route path="/" element={<AppHomeRedirect />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/forbidden" element={<ForbiddenPage />} />
+
+        <Route
+          path="/home"
+          element={
+            <ProtectedRoute>
+              <ExecutiveSummaryPage />
+            </ProtectedRoute>
+          }
+        />
 
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute allowedRoles={["admin", "cashier", "warehouse"]}>
+            <ProtectedRoute>
               <DashboardPage />
             </ProtectedRoute>
           }
@@ -45,88 +87,43 @@ export default function App() {
         <Route
           path="/sales"
           element={
-            <ProtectedRoute allowedRoles={["admin", "cashier"]}>
+            <RoleGuard path="/sales">
               <SalesPage />
-            </ProtectedRoute>
+            </RoleGuard>
           }
         />
 
         <Route
           path="/cash-register"
           element={
-            <ProtectedRoute allowedRoles={["admin", "cashier"]}>
+            <RoleGuard path="/cash-register">
               <CashRegisterPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/sales-history"
-          element={
-            <ProtectedRoute allowedRoles={["admin", "cashier"]}>
-              <SalesHistoryPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/receipt/:invoiceNumber"
-          element={
-            <ProtectedRoute allowedRoles={["admin", "cashier"]}>
-              <ReceiptPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/returns"
-          element={
-            <ProtectedRoute allowedRoles={["admin", "cashier"]}>
-              <ReturnsPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/barcode-labels"
-          element={
-            <ProtectedRoute allowedRoles={["admin", "cashier"]}>
-              <BarcodeLabelsPage />
-            </ProtectedRoute>
+            </RoleGuard>
           }
         />
 
         <Route
           path="/products"
           element={
-            <ProtectedRoute allowedRoles={["admin", "warehouse"]}>
+            <RoleGuard path="/products">
               <ProductsPage />
-            </ProtectedRoute>
+            </RoleGuard>
           }
         />
 
         <Route
-          path="/purchases"
+          path="/users"
           element={
-            <ProtectedRoute allowedRoles={["admin", "warehouse"]}>
-              <PurchasesPage />
-            </ProtectedRoute>
+            <RoleGuard path="/users">
+              <UsersPage />
+            </RoleGuard>
           }
         />
 
         <Route
           path="/inventory"
           element={
-            <ProtectedRoute allowedRoles={["admin", "warehouse"]}>
-              <InventoryPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/stock-report"
-          element={
-            <ProtectedRoute allowedRoles={["admin", "warehouse"]}>
+            <ProtectedRoute>
               <StockReportPage />
             </ProtectedRoute>
           }
@@ -135,8 +132,17 @@ export default function App() {
         <Route
           path="/expenses"
           element={
-            <ProtectedRoute allowedRoles={["admin"]}>
+            <ProtectedRoute>
               <ExpensesPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/returns"
+          element={
+            <ProtectedRoute>
+              <ReturnsPage />
             </ProtectedRoute>
           }
         />
@@ -144,36 +150,27 @@ export default function App() {
         <Route
           path="/profit-report"
           element={
-            <ProtectedRoute allowedRoles={["admin"]}>
+            <RoleGuard path="/profit-report">
               <ProfitReportPage />
-            </ProtectedRoute>
+            </RoleGuard>
+          }
+        />
+
+        <Route
+          path="/pnl"
+          element={
+            <RoleGuard path="/pnl">
+              <PnLPage />
+            </RoleGuard>
           }
         />
 
         <Route
           path="/audit-logs"
           element={
-            <ProtectedRoute allowedRoles={["admin"]}>
+            <RoleGuard path="/audit-logs">
               <AuditLogsPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/settings"
-          element={
-            <ProtectedRoute allowedRoles={["admin"]}>
-              <SettingsPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/users"
-          element={
-            <ProtectedRoute allowedRoles={["admin"]}>
-              <UsersPage />
-            </ProtectedRoute>
+            </RoleGuard>
           }
         />
 

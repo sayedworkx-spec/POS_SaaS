@@ -2,7 +2,14 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import AuthLayout from "../layouts/AuthLayout";
-import { getCurrentUser, getHomeRouteForRole, login } from "../services/authService";
+import {
+  getCurrentUser,
+  getHomeRouteForRole,
+  login,
+} from "../services/authService";
+import { syncProductsCache } from "../services/productsApi";
+import { syncSalesCache } from "../services/salesService";
+import { syncCashRegisterCache } from "../services/cashRegisterService";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -10,6 +17,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState("admin@demo.com");
   const [password, setPassword] = useState("admin123");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const currentUser = getCurrentUser();
@@ -19,15 +27,25 @@ export default function LoginPage() {
     }
   }, [navigate]);
 
-  function handleLogin() {
-    const user = login(email, password);
+  async function handleLogin() {
+    try {
+      setError("");
+      setLoading(true);
 
-    if (!user) {
-      setError("Invalid email or password");
-      return;
+      const user = await login(email, password);
+
+      await Promise.allSettled([
+        syncProductsCache(),
+        syncSalesCache(),
+        syncCashRegisterCache(),
+      ]);
+
+      navigate(getHomeRouteForRole(user.role), { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid email or password");
+    } finally {
+      setLoading(false);
     }
-
-    navigate(getHomeRouteForRole(user.role), { replace: true });
   }
 
   return (
@@ -67,10 +85,11 @@ export default function LoginPage() {
         </div>
 
         <button
-          className="w-full rounded-xl bg-blue-600 p-3 font-semibold text-white hover:bg-blue-700"
+          className="w-full rounded-xl bg-blue-600 p-3 font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
           onClick={handleLogin}
+          disabled={loading}
         >
-          Login
+          {loading ? "Signing in..." : "Login"}
         </button>
 
         <div className="mt-4 text-center text-sm">

@@ -1,19 +1,20 @@
+import {
+  apiFetch,
+  clearStoredToken,
+  getStoredToken,
+  readApiError,
+  setStoredToken,
+} from "./api";
 import { addAuditLog } from "./auditService";
 import type { User, UserRole } from "../types/User";
 
 const USERS_KEY = "users";
 const CURRENT_USER_KEY = "currentUser";
 
-const ROLE_HOMES: Record<UserRole, string> = {
-  admin: "/dashboard",
-  cashier: "/sales",
-  warehouse: "/inventory",
-};
-
-const ROLE_LABELS: Record<UserRole, string> = {
-  admin: "Admin",
-  cashier: "Cashier",
-  warehouse: "Warehouse",
+type PublicUser = Omit<User, "password">;
+type AuthResponse = {
+  token: string;
+  user: PublicUser;
 };
 
 function normalizeRole(raw: unknown, fallback: UserRole = "cashier"): UserRole {
@@ -24,30 +25,85 @@ function normalizeRole(raw: unknown, fallback: UserRole = "cashier"): UserRole {
   return fallback;
 }
 
-function inferRole(raw: Partial<User> & Record<string, unknown>): UserRole {
-  const explicit = normalizeRole(raw.role, "cashier");
-  if (explicit) {
-    return explicit;
-  }
-
-  const email = String(raw.email ?? "").toLowerCase();
-  const name = String(raw.name ?? "").toLowerCase();
-
-  if (email.includes("admin") || name === "admin") {
-    return "admin";
-  }
-
-  return "cashier";
-}
-
-function normalizeUser(raw: Record<string, unknown>): User {
+function normalizeUser(raw: Partial<User> & Record<string, unknown>): User {
   return {
     id: Number(raw.id ?? Date.now()),
     name: String(raw.name ?? "").trim() || "User",
     email: String(raw.email ?? "").trim().toLowerCase(),
-    password: String(raw.password ?? ""),
-    role: inferRole(raw),
+    password:
+      raw.password !== undefined && raw.password !== null
+        ? String(raw.password)
+        : undefined,
+    role: normalizeRole(raw.role, "cashier"),
     isActive: raw.isActive === false ? false : true,
+    createdAt:
+      raw.createdAt !== undefined && raw.createdAt !== null
+        ? String(raw.createdAt)
+        : undefined,
+    updatedAt:
+      raw.updatedAt !== undefined && raw.updatedAt !== null
+        ? String(raw.updatedAt)
+        : undefined,
+  };
+}
+
+function saveAuthState(token: string, user: PublicUser) {
+  setStoredToken(token);
+  localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
+}
+
+function readStoredCurrentUser(): User | null {
+  const raw = localStorage.getItem(CURRENT_USER_KEY);
+
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return normalizeUser(parsed);
+  } catch {
+    localStorage.removeItem(CURRENT_USER_KEY);
+    return null;
+  }
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) {
+      return null;
+    }
+
+    const base64Url = parts[1];
+    const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const json = atob(padded);
+
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function userFromToken(token: string): User | null {
+  const payload = decodeJwtPayload(token);
+
+  if (!payload) return null;
+
+  const id = Number(payload.sub ?? 0);
+  const email = String(payload.email ?? "").trim().toLowerCase();
+  const role = normalizeRole(payload.role, "cashier");
+  const name = String(payload.name ?? "").trim() || "User";
+
+  if (!id || !email) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    email,
+    role,
+    isActive: true,
   };
 }
 
@@ -80,7 +136,7 @@ function seedUsers(): User[] {
   ];
 }
 
-function readUsers(): User[] {
+function readLegacyUsers(): User[] {
   const raw = localStorage.getItem(USERS_KEY);
 
   if (!raw) {
@@ -101,6 +157,7 @@ function readUsers(): User[] {
     const normalized = parsed.map((item) =>
       normalizeUser(item as Record<string, unknown>)
     );
+
     localStorage.setItem(USERS_KEY, JSON.stringify(normalized));
     return normalized;
   } catch {
@@ -110,20 +167,11 @@ function readUsers(): User[] {
   }
 }
 
-function writeUsers(users: User[]) {
+function writeLegacyUsers(users: User[]) {
   localStorage.setItem(USERS_KEY, JSON.stringify(users));
 }
 
-function saveCurrentUser(user: User | null) {
-  if (!user) {
-    localStorage.removeItem(CURRENT_USER_KEY);
-    return;
-  }
-
-  localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
-}
-
-function createUserRecord(input: {
+function createLegacyUserRecord(input: {
   name: string;
   email: string;
   password: string;
@@ -138,11 +186,9 @@ function createUserRecord(input: {
     throw new Error("All fields are required");
   }
 
-  const users = readUsers();
+  const users = readLegacyUsers();
+  const emailExists = users.some((item) => item.email.toLowerCase() === email);
 
-  const emailExists = users.some(
-    (item) => item.email.toLowerCase() === email
-  );
   if (emailExists) {
     throw new Error("Email already exists");
   }
@@ -156,169 +202,61 @@ function createUserRecord(input: {
     isActive: input.isActive ?? true,
   };
 
-  const nextUsers = [...users, newUser];
-  writeUsers(nextUsers);
-
+  writeLegacyUsers([...users, newUser]);
   return newUser;
 }
 
 export function getUsers(): User[] {
-  return readUsers();
+  return readLegacyUsers();
 }
 
 export function getUserById(userId: number): User | null {
-  return readUsers().find((user) => user.id === userId) ?? null;
+  return readLegacyUsers().find((user) => user.id === userId) ?? null;
 }
 
 export function getCurrentUser(): User | null {
-  const raw = localStorage.getItem(CURRENT_USER_KEY);
+  const stored = readStoredCurrentUser();
+  if (stored) {
+    return stored;
+  }
 
-  if (!raw) {
+  const token = getStoredToken();
+  if (!token) {
     return null;
   }
 
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const currentId = Number(parsed.id ?? 0);
-    const currentEmail = String(parsed.email ?? "").toLowerCase();
-
-    const users = readUsers();
-    const matched =
-      users.find((user) => user.id === currentId) ??
-      users.find((user) => user.email.toLowerCase() === currentEmail) ??
-      null;
-
-    if (matched) {
-      saveCurrentUser(matched);
-      return matched;
-    }
-
-    return normalizeUser(parsed);
-  } catch {
+  const tokenUser = userFromToken(token);
+  if (!tokenUser) {
+    logout();
     return null;
   }
+
+  localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(tokenUser));
+  return tokenUser;
 }
 
 export function getHomeRouteForRole(role: UserRole) {
-  return ROLE_HOMES[role];
+  switch (role) {
+    case "admin":
+      return "/dashboard";
+    case "warehouse":
+      return "/inventory";
+    case "cashier":
+    default:
+      return "/sales";
+  }
 }
 
 export function getRoleLabel(role: UserRole) {
-  return ROLE_LABELS[role];
-}
-
-export function login(email: string, password: string) {
-  const users = readUsers();
-  const normalizedEmail = email.trim().toLowerCase();
-
-  const user = users.find(
-    (item) =>
-      item.email.toLowerCase() === normalizedEmail &&
-      item.password === password &&
-      item.isActive
-  );
-
-  if (!user) {
-    addAuditLog(
-      "LOGIN_FAILED",
-      `Failed login attempt for ${normalizedEmail}`,
-      "System"
-    );
-    return null;
+  switch (role) {
+    case "admin":
+      return "Admin";
+    case "warehouse":
+      return "Warehouse";
+    case "cashier":
+    default:
+      return "Cashier";
   }
-
-  saveCurrentUser(user);
-  addAuditLog("LOGIN", `Signed in as ${user.role}`, user.name);
-  return user;
-}
-
-type SignupInput = {
-  name: string;
-  email: string;
-  password: string;
-  role?: UserRole;
-  isActive?: boolean;
-};
-
-export function signup(input: SignupInput) {
-  const newUser = createUserRecord(input);
-  saveCurrentUser(newUser);
-  addAuditLog("USER_CREATED", `${newUser.name} (${newUser.role})`, newUser.name);
-  return newUser;
-}
-
-export function createUser(input: SignupInput) {
-  const newUser = createUserRecord(input);
-  addAuditLog("USER_CREATED", `${newUser.name} (${newUser.role})`, newUser.name);
-  return newUser;
-}
-
-type UpdateUserInput = Partial<
-  Pick<User, "name" | "email" | "password" | "role" | "isActive">
->;
-
-export function updateUser(userId: number, updates: UpdateUserInput) {
-  const users = readUsers();
-  const index = users.findIndex((user) => user.id === userId);
-
-  if (index === -1) {
-    throw new Error("User not found");
-  }
-
-  const updated: User = {
-    ...users[index],
-    ...updates,
-    name: updates.name !== undefined ? updates.name.trim() : users[index].name,
-    email:
-      updates.email !== undefined
-        ? updates.email.trim().toLowerCase()
-        : users[index].email,
-    role: updates.role ?? users[index].role,
-    isActive: updates.isActive ?? users[index].isActive,
-  };
-
-  users[index] = updated;
-  writeUsers(users);
-
-  const current = getCurrentUser();
-  if (current && current.id === userId) {
-    saveCurrentUser(updated);
-  }
-
-  addAuditLog(
-    "USER_UPDATED",
-    `${updated.name} (${Object.keys(updates).join(", ") || "profile"})`,
-    current?.name ?? "System"
-  );
-
-  return updated;
-}
-
-export function deleteUser(userId: number) {
-  const users = readUsers();
-  const user = users.find((item) => item.id === userId) ?? null;
-  const nextUsers = users.filter((item) => item.id !== userId);
-  writeUsers(nextUsers);
-
-  const current = getCurrentUser();
-  if (current && current.id === userId) {
-    logout();
-  }
-
-  addAuditLog(
-    "USER_DELETED",
-    user ? `${user.name} (${user.email})` : `User ID ${userId}`,
-    current?.name ?? "System"
-  );
-}
-
-export function logout() {
-  const current = getCurrentUser();
-  if (current) {
-    addAuditLog("LOGOUT", "Signed out", current.name);
-  }
-
-  localStorage.removeItem(CURRENT_USER_KEY);
 }
 
 export function hasAccess(userRole: UserRole, allowedRoles?: UserRole[]) {
@@ -327,4 +265,114 @@ export function hasAccess(userRole: UserRole, allowedRoles?: UserRole[]) {
   }
 
   return allowedRoles.includes(userRole);
+}
+
+export async function login(email: string, password: string) {
+  const response = await apiFetch("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({
+      email: email.trim().toLowerCase(),
+      password,
+    }),
+  });
+
+  if (!response.ok) {
+    void addAuditLog("LOGIN_FAILED", `Failed login attempt for ${email.trim().toLowerCase()}`, "System");
+    throw new Error(await readApiError(response));
+  }
+
+  const data = (await response.json()) as AuthResponse;
+  saveAuthState(data.token, data.user);
+
+  void addAuditLog("LOGIN", `Signed in as ${data.user.role}`, data.user.name);
+
+  return data.user;
+}
+
+export async function register(input: {
+  name: string;
+  email: string;
+  password: string;
+  role?: Exclude<UserRole, "admin">;
+}) {
+  const response = await apiFetch("/auth/register", {
+    method: "POST",
+    body: JSON.stringify({
+      name: input.name,
+      email: input.email,
+      password: input.password,
+      role: input.role ?? "cashier",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const data = (await response.json()) as AuthResponse;
+  saveAuthState(data.token, data.user);
+
+  void addAuditLog("USER_CREATED", `${data.user.name} (${data.user.role})`, data.user.name);
+
+  return data.user;
+}
+
+export const signup = register;
+
+export function createUser(input: {
+  name: string;
+  email: string;
+  password: string;
+  role?: UserRole;
+  isActive?: boolean;
+}) {
+  return createLegacyUserRecord(input);
+}
+
+export function updateUser(
+  userId: number,
+  updates: Partial<Pick<User, "name" | "email" | "password" | "role" | "isActive">>
+) {
+  const users = readLegacyUsers();
+  const index = users.findIndex((user) => user.id === userId);
+
+  if (index === -1) {
+    throw new Error("User not found");
+  }
+
+  const current = users[index];
+  const updated: User = {
+    ...current,
+    ...updates,
+    name: updates.name !== undefined ? updates.name.trim() : current.name,
+    email:
+      updates.email !== undefined
+        ? updates.email.trim().toLowerCase()
+        : current.email,
+    role: updates.role ?? current.role,
+    isActive: updates.isActive ?? current.isActive,
+  };
+
+  users[index] = updated;
+  writeLegacyUsers(users);
+  return updated;
+}
+
+export function deleteUser(userId: number) {
+  const users = readLegacyUsers();
+  writeLegacyUsers(users.filter((user) => user.id !== userId));
+}
+
+export function isAuthenticated() {
+  return Boolean(getStoredToken() || readStoredCurrentUser());
+}
+
+export function logout() {
+  const current = getCurrentUser();
+  if (current) {
+    void addAuditLog("LOGOUT", "Signed out", current.name);
+  }
+
+  clearStoredToken();
+  localStorage.removeItem(CURRENT_USER_KEY);
 }

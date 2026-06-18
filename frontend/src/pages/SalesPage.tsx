@@ -7,25 +7,29 @@ import MainLayout from "../layouts/MainLayout";
 import { getCurrentUser } from "../services/authService";
 import { addAuditLog } from "../services/auditService";
 import { getSettings } from "../services/settingsService";
-import { getProducts, findProductByBarcode } from "../services/productService";
-import { addSale, getSales } from "../services/salesService";
+import {
+  findProductByBarcode,
+  getProducts,
+  syncProductsCache,
+} from "../services/productsApi";
+import { addSale, getSales, syncSalesCache } from "../services/salesService";
 import {
   addCashMovement,
   getCurrentShift,
   getShiftSummary,
 } from "../services/cashRegisterService";
+import {
+  consumeRestoreSuspendedSale,
+  deleteSuspendedSale,
+  getSuspendedSales,
+  suspendSale,
+} from "../services/suspendedSaleService";
 
 import type { Product } from "../types/Product";
 import type { Sale } from "../types/Sale";
+import type { SuspendedSaleItem } from "../types/SuspendedSale";
 
-type CartItem = {
-  productId: number;
-  quantity: number;
-};
-
-type CartLine = CartItem & {
-  product: Product;
-};
+type CartLine = SuspendedSaleItem;
 
 function formatMoney(value: number, currencySymbol: string) {
   return `${currencySymbol}${new Intl.NumberFormat("en-US", {
@@ -55,7 +59,7 @@ export default function SalesPage() {
 
   const [products, setProducts] = useState<Product[]>(() => getProducts());
   const [sales, setSales] = useState<Sale[]>(() => getSales());
-  const [cart, setCart] = useState<CartItem[]>([]);
+  const [cartLines, setCartLines] = useState<CartLine[]>([]);
   const [search, setSearch] = useState("");
   const [barcodeInput, setBarcodeInput] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<number | "all">("all");
@@ -63,11 +67,68 @@ export default function SalesPage() {
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "card">("cash");
   const [cashReceived, setCashReceived] = useState(0);
   const [receipt, setReceipt] = useState<Sale | null>(null);
+  const [suspendedVersion, setSuspendedVersion] = useState(0);
+  const [message, setMessage] = useState("");
 
   const barcodeRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    barcodeRef.current?.focus();
+    let active = true;
+
+    async function load() {
+      try {
+        const [freshProducts, freshSales] = await Promise.all([
+          syncProductsCache(),
+          syncSalesCache(),
+        ]);
+
+        if (!active) return;
+
+        setProducts(freshProducts);
+        setSales(freshSales);
+      } catch {
+        if (!active) return;
+        setProducts(getProducts());
+        setSales(getSales());
+      } finally {
+        if (active) {
+          barcodeRef.current?.focus();
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const draft = consumeRestoreSuspendedSale();
+
+    if (!draft) {
+      return;
+    }
+
+    setCartLines(draft.sale.items);
+    setDiscountPercent(draft.sale.discountPercent);
+    setPaymentMethod(draft.sale.paymentMethod);
+    setCashReceived(0);
+    setReceipt(null);
+    setMessage(`Restored ${draft.sale.reference} from held sales`);
+
+    const currentHeldSales = getSuspendedSales();
+    const exists = currentHeldSales.some((sale) => sale.id === draft.sourceId);
+
+    if (exists) {
+      deleteSuspendedSale(draft.sourceId);
+      setSuspendedVersion((current) => current + 1);
+    }
+
+    setTimeout(() => {
+      barcodeRef.current?.focus();
+    }, 0);
   }, []);
 
   useEffect(() => {
@@ -86,14 +147,19 @@ export default function SalesPage() {
         clearCart();
       }
 
+      if (e.key === "F8" && !typingField) {
+        e.preventDefault();
+        handleSuspendSale();
+      }
+
       if (e.key === "Enter" && !typingField) {
         e.preventDefault();
-        handleCheckout();
+        void handleCheckout();
       }
 
       if (e.key === "F9") {
         e.preventDefault();
-        handleCheckout();
+        void handleCheckout();
       }
 
       if (e.ctrlKey && e.key.toLowerCase() === "p" && receipt) {
@@ -112,7 +178,7 @@ export default function SalesPage() {
       window.removeEventListener("keydown", handler);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receipt, cart, barcodeInput, cashReceived, discountPercent, paymentMethod]);
+  }, [receipt, cartLines, barcodeInput, cashReceived, discountPercent, paymentMethod]);
 
   const categoryIds = useMemo(() => {
     const ids = Array.from(new Set(products.map((product) => product.categoryId)));
@@ -154,35 +220,12 @@ export default function SalesPage() {
     });
   }, [products, search, selectedCategory]);
 
-  const cartLines = useMemo(() => {
-    return cart
-      .map((item) => {
-        const product = products.find((p) => p.id === item.productId);
-
-        if (!product) {
-          return null;
-        }
-
-        return {
-          ...item,
-          product,
-        };
-      })
-      .filter(Boolean) as CartLine[];
-  }, [cart, products]);
-
   const subtotal = useMemo(() => {
-    return cartLines.reduce(
-      (sum, line) => sum + line.product.sellPrice * line.quantity,
-      0
-    );
+    return cartLines.reduce((sum, line) => sum + line.lineTotal, 0);
   }, [cartLines]);
 
   const costTotal = useMemo(() => {
-    return cartLines.reduce(
-      (sum, line) => sum + line.product.costPrice * line.quantity,
-      0
-    );
+    return cartLines.reduce((sum, line) => sum + line.costTotal, 0);
   }, [cartLines]);
 
   const discountAmount = useMemo(() => {
@@ -193,9 +236,27 @@ export default function SalesPage() {
   const profit = total - costTotal;
   const change = Math.max(0, cashReceived - total);
 
-  function refreshData() {
-    setProducts(getProducts());
-    setSales(getSales());
+  const suspendedSales = useMemo(() => {
+    return getSuspendedSales();
+  }, [suspendedVersion]);
+
+  async function refreshData() {
+    try {
+      const [freshProducts, freshSales] = await Promise.all([
+        syncProductsCache(),
+        syncSalesCache(),
+      ]);
+
+      setProducts(freshProducts);
+      setSales(freshSales);
+    } catch {
+      setProducts(getProducts());
+      setSales(getSales());
+    }
+  }
+
+  function refreshSuspendedCount() {
+    setSuspendedVersion((current) => current + 1);
   }
 
   function focusBarcodeInput() {
@@ -213,13 +274,18 @@ export default function SalesPage() {
 
     setReceipt(null);
 
-    setCart((current) => {
+    setCartLines((current) => {
       const existing = current.find((item) => item.productId === product.id);
 
       if (existing) {
         return current.map((item) =>
           item.productId === product.id
-            ? { ...item, quantity: item.quantity + 1 }
+            ? {
+                ...item,
+                quantity: item.quantity + 1,
+                lineTotal: item.unitPrice * (item.quantity + 1),
+                costTotal: item.costPrice * (item.quantity + 1),
+              }
             : item
         );
       }
@@ -228,7 +294,13 @@ export default function SalesPage() {
         ...current,
         {
           productId: product.id,
+          sku: product.sku,
+          name: product.name,
           quantity: 1,
+          unitPrice: product.sellPrice,
+          costPrice: product.costPrice,
+          lineTotal: product.sellPrice,
+          costTotal: product.costPrice,
         },
       ];
     });
@@ -248,7 +320,9 @@ export default function SalesPage() {
 
     const foundProduct =
       findProductByBarcode(term) ??
-      products.find((product) => product.name.toLowerCase().includes(term.toLowerCase())) ??
+      products.find((product) =>
+        product.name.toLowerCase().includes(term.toLowerCase())
+      ) ??
       null;
 
     if (!foundProduct) {
@@ -270,10 +344,15 @@ export default function SalesPage() {
   }
 
   function increaseQty(productId: number) {
-    setCart((current) =>
+    setCartLines((current) =>
       current.map((item) =>
         item.productId === productId
-          ? { ...item, quantity: item.quantity + 1 }
+          ? {
+              ...item,
+              quantity: item.quantity + 1,
+              lineTotal: item.unitPrice * (item.quantity + 1),
+              costTotal: item.costPrice * (item.quantity + 1),
+            }
           : item
       )
     );
@@ -281,11 +360,16 @@ export default function SalesPage() {
   }
 
   function decreaseQty(productId: number) {
-    setCart((current) =>
+    setCartLines((current) =>
       current
         .map((item) =>
           item.productId === productId
-            ? { ...item, quantity: item.quantity - 1 }
+            ? {
+                ...item,
+                quantity: item.quantity - 1,
+                lineTotal: item.unitPrice * (item.quantity - 1),
+                costTotal: item.costPrice * (item.quantity - 1),
+              }
             : item
         )
         .filter((item) => item.quantity > 0)
@@ -294,20 +378,47 @@ export default function SalesPage() {
   }
 
   function removeFromCart(productId: number) {
-    setCart((current) => current.filter((item) => item.productId !== productId));
+    setCartLines((current) => current.filter((item) => item.productId !== productId));
     focusBarcodeInput();
   }
 
   function clearCart() {
-    setCart([]);
+    setCartLines([]);
     setDiscountPercent(0);
     setPaymentMethod("cash");
     setCashReceived(0);
     setReceipt(null);
+    setMessage("");
     focusBarcodeInput();
   }
 
-  function handleCheckout() {
+  function handleSuspendSale() {
+    if (cartLines.length === 0) {
+      alert("Cart is empty");
+      return;
+    }
+
+    const held = suspendSale({
+      cashier: currentUser?.name ?? "Cashier",
+      reason: `Held from Sales POS`,
+      paymentMethod,
+      discountPercent,
+      items: cartLines,
+    });
+
+    addAuditLog(
+      "SALE_SUSPENDED",
+      `Held sale ${held.reference} with ${held.items.length} items`,
+      currentUser?.name ?? "Cashier"
+    );
+
+    setSuspendedVersion((current) => current + 1);
+    clearCart();
+    setMessage(`Sale held as ${held.reference}`);
+    focusBarcodeInput();
+  }
+
+  async function handleCheckout() {
     if (!currentShift) {
       alert("Open a cash shift first");
       return;
@@ -318,12 +429,18 @@ export default function SalesPage() {
       return;
     }
 
-    const insufficientItem = cartLines.find(
-      (line) => line.product.stock < line.quantity
-    );
+    const insufficientItem = cartLines.find((line) => {
+      const product = products.find((p) => p.id === line.productId);
+      return !product || product.stock < line.quantity;
+    });
 
     if (insufficientItem) {
-      alert(`${insufficientItem.product.name} does not have enough stock`);
+      const product = products.find((p) => p.id === insufficientItem.productId);
+      alert(
+        product
+          ? `${product.name} does not have enough stock`
+          : "A cart item is missing from products"
+      );
       return;
     }
 
@@ -336,7 +453,7 @@ export default function SalesPage() {
     const invoiceNumber = `INV-${Date.now().toString().slice(-6)}`;
 
     try {
-      const newSale = addSale({
+      const newSale = await addSale({
         invoiceNumber,
         saleDate,
         cashier: currentUser?.name ?? "Cashier",
@@ -350,16 +467,7 @@ export default function SalesPage() {
         total,
         cashReceived: paymentMethod === "cash" ? cashReceived : 0,
         change: paymentMethod === "cash" ? change : 0,
-        items: cartLines.map((line) => ({
-          productId: line.product.id,
-          sku: line.product.sku,
-          name: line.product.name,
-          quantity: line.quantity,
-          unitPrice: line.product.sellPrice,
-          costPrice: line.product.costPrice,
-          lineTotal: line.product.sellPrice * line.quantity,
-          costTotal: line.product.costPrice * line.quantity,
-        })),
+        items: cartLines,
       });
 
       addAuditLog(
@@ -381,12 +489,10 @@ export default function SalesPage() {
       }
 
       setReceipt(newSale);
-      setCart([]);
-      setDiscountPercent(0);
-      setPaymentMethod("cash");
-      setCashReceived(0);
-      refreshData();
+      clearCart();
+      await refreshData();
       focusBarcodeInput();
+      setMessage(`Sale completed: ${newSale.invoiceNumber}`);
     } catch (error) {
       alert(error instanceof Error ? error.message : "Sale failed");
     }
@@ -418,8 +524,21 @@ export default function SalesPage() {
               {formatMoney(total, settings.currencySymbol)}
             </div>
           </div>
+
+          <Link
+            to="/suspended-sales"
+            className="col-span-2 rounded-xl bg-slate-900 px-4 py-3 text-center text-sm font-medium text-white"
+          >
+            Held Sales ({suspendedSales.length})
+          </Link>
         </div>
       </div>
+
+      {message && (
+        <div className="mb-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
+          {message}
+        </div>
+      )}
 
       {!currentShift ? (
         <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 p-4 flex items-center justify-between gap-4">
@@ -442,7 +561,9 @@ export default function SalesPage() {
           <div>
             <div className="font-semibold text-emerald-900">Cash shift open</div>
             <div className="text-sm text-emerald-800">
-              Opening cash: {formatMoney(currentShift.openingCash, settings.currencySymbol)} • Expected cash:{" "}
+              Opening cash:{" "}
+              {formatMoney(currentShift.openingCash, settings.currencySymbol)} •
+              Expected cash:{" "}
               {formatMoney(
                 shiftSummary?.expectedCash ?? currentShift.openingCash,
                 settings.currencySymbol
@@ -502,7 +623,8 @@ export default function SalesPage() {
                       <div className="font-semibold">{product.name}</div>
                     </div>
                     <div className="text-sm text-slate-500">
-                      {formatMoney(product.sellPrice, settings.currencySymbol)} • Stock {product.stock}
+                      {formatMoney(product.sellPrice, settings.currencySymbol)} •
+                      Stock {product.stock}
                     </div>
                   </button>
                 ))}
@@ -643,10 +765,8 @@ export default function SalesPage() {
                   <div key={line.productId} className="rounded-xl border p-3">
                     <div className="flex items-start justify-between gap-3 mb-3">
                       <div>
-                        <div className="font-semibold">{line.product.name}</div>
-                        <div className="text-xs text-slate-500">
-                          {line.product.sku} • {line.product.barcode}
-                        </div>
+                        <div className="font-semibold">{line.name}</div>
+                        <div className="text-xs text-slate-500">{line.sku}</div>
                       </div>
 
                       <button
@@ -679,10 +799,7 @@ export default function SalesPage() {
                       </div>
 
                       <div className="font-semibold">
-                        {formatMoney(
-                          line.product.sellPrice * line.quantity,
-                          settings.currencySymbol
-                        )}
+                        {formatMoney(line.lineTotal, settings.currencySymbol)}
                       </div>
                     </div>
                   </div>
@@ -794,12 +911,21 @@ export default function SalesPage() {
               )}
             </div>
 
-            <button
-              onClick={handleCheckout}
-              className="mt-5 w-full bg-emerald-600 text-white py-3 rounded-xl font-semibold hover:bg-emerald-700"
-            >
-              Checkout
-            </button>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button
+                onClick={handleSuspendSale}
+                className="rounded-xl border px-4 py-3 font-semibold"
+              >
+                Hold Sale
+              </button>
+
+              <button
+                onClick={() => void handleCheckout()}
+                className="rounded-xl bg-emerald-600 px-4 py-3 font-semibold text-white hover:bg-emerald-700"
+              >
+                Checkout
+              </button>
+            </div>
           </div>
 
           {receipt && (

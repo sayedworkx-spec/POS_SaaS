@@ -9,4 +9,6 @@ export interface Product {
   sellPrice: number;
   reorderLevel: number;
   isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }

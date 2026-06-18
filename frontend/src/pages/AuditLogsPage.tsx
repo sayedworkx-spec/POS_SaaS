@@ -1,7 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import MainLayout from "../layouts/MainLayout";
-import { clearAuditLogs, getAuditLogs } from "../services/auditService";
+import {
+  clearAuditLogs,
+  getAuditLogs,
+  syncAuditLogsCache,
+} from "../services/auditService";
 
 import type { AuditLog } from "../types/AuditLog";
 
@@ -15,37 +19,67 @@ function formatDate(value: string) {
 export default function AuditLogsPage() {
   const [version, setVersion] = useState(0);
   const [search, setSearch] = useState("");
+  const [actionFilter, setActionFilter] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [logs, setLogs] = useState<AuditLog[]>(() => getAuditLogs());
 
-  const logs = useMemo(() => {
-    return getAuditLogs();
+  async function refresh() {
+    try {
+      setLoading(true);
+      const fresh = await syncAuditLogsCache();
+      setLogs(fresh);
+    } catch {
+      setLogs(getAuditLogs());
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version]);
+
+  const actions = useMemo(() => {
+    return Array.from(new Set(logs.map((log) => log.action))).sort();
+  }, [logs]);
 
   const filteredLogs = useMemo(() => {
     const term = search.trim().toLowerCase();
 
-    if (!term) {
-      return logs;
-    }
-
     return logs.filter((log) => {
-      return (
+      const matchesSearch =
+        !term ||
         log.action.toLowerCase().includes(term) ||
         log.username.toLowerCase().includes(term) ||
-        log.details.toLowerCase().includes(term)
-      );
+        log.details.toLowerCase().includes(term);
+
+      const matchesAction =
+        actionFilter === "all" || log.action === actionFilter;
+
+      return matchesSearch && matchesAction;
     });
-  }, [logs, search]);
+  }, [logs, search, actionFilter]);
 
-  function refresh() {
-    setVersion((current) => current + 1);
-  }
+  const todayCount = useMemo(() => {
+    const today = new Date().toDateString();
 
-  function handleClear() {
+    return logs.filter((log) => new Date(log.createdAt).toDateString() === today)
+      .length;
+  }, [logs]);
+
+  async function handleClear() {
     const ok = window.confirm("Clear all audit logs?");
     if (!ok) return;
 
-    clearAuditLogs();
-    refresh();
+    try {
+      await clearAuditLogs();
+      setSearch("");
+      setActionFilter("all");
+      setVersion((current) => current + 1);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Unable to clear logs");
+    }
   }
 
   return (
@@ -54,7 +88,7 @@ export default function AuditLogsPage() {
         <div>
           <h1 className="text-3xl font-bold">Audit Logs</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Track important actions in the system
+            Track critical system actions
           </p>
         </div>
 
@@ -62,6 +96,11 @@ export default function AuditLogsPage() {
           <div className="rounded-xl bg-white px-4 py-3 shadow">
             <div className="text-xs text-slate-500">Records</div>
             <div className="text-2xl font-bold mt-1">{filteredLogs.length}</div>
+          </div>
+
+          <div className="rounded-xl bg-white px-4 py-3 shadow">
+            <div className="text-xs text-slate-500">Today</div>
+            <div className="text-2xl font-bold mt-1">{todayCount}</div>
           </div>
 
           <button
@@ -73,7 +112,7 @@ export default function AuditLogsPage() {
         </div>
       </div>
 
-      <div className="mb-6 w-full max-w-xl">
+      <div className="mb-6 grid gap-3 lg:grid-cols-[1fr_auto]">
         <input
           type="text"
           value={search}
@@ -81,6 +120,19 @@ export default function AuditLogsPage() {
           placeholder="Search by user, action, or details..."
           className="w-full rounded-xl border bg-white p-3 shadow"
         />
+
+        <select
+          value={actionFilter}
+          onChange={(e) => setActionFilter(e.target.value)}
+          className="rounded-xl border bg-white p-3 shadow"
+        >
+          <option value="all">All Actions</option>
+          {actions.map((action) => (
+            <option key={action} value={action}>
+              {action}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="overflow-hidden rounded-2xl bg-white shadow">
@@ -96,14 +148,20 @@ export default function AuditLogsPage() {
             </thead>
 
             <tbody>
-              {filteredLogs.length === 0 ? (
+              {loading ? (
+                <tr>
+                  <td className="p-6 text-slate-500" colSpan={4}>
+                    Loading logs...
+                  </td>
+                </tr>
+              ) : filteredLogs.length === 0 ? (
                 <tr>
                   <td className="p-6 text-slate-500" colSpan={4}>
                     No audit logs found
                   </td>
                 </tr>
               ) : (
-                filteredLogs.map((log: AuditLog) => (
+                filteredLogs.map((log) => (
                   <tr key={log.id} className="border-t">
                     <td className="p-4">{log.username}</td>
                     <td className="p-4 font-medium">{log.action}</td>

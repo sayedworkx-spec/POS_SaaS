@@ -1,8 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import MainLayout from "../layouts/MainLayout";
-import { getSales } from "../services/salesService";
+import {
+  fetchSaleByInvoiceNumber,
+  getSaleByInvoiceNumber,
+} from "../services/salesService";
 import { getSettings } from "../services/settingsService";
 
 import type { Sale } from "../types/Sale";
@@ -14,20 +17,51 @@ function formatDate(value: string) {
   });
 }
 
+function formatMoney(value: number, currencySymbol: string) {
+  return `${currencySymbol}${new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 0,
+  }).format(value)}`;
+}
+
 export default function ReceiptPage() {
   const { invoiceNumber = "" } = useParams();
   const [searchParams] = useSearchParams();
-
-  const sale: Sale | null = useMemo(() => {
-    return getSales().find((item) => item.invoiceNumber === invoiceNumber) ?? null;
-  }, [invoiceNumber]);
-
   const settings = useMemo(() => getSettings(), []);
+  const [sale, setSale] = useState<Sale | null>(() =>
+    getSaleByInvoiceNumber(invoiceNumber)
+  );
 
-  const formatMoney = (value: number) =>
-    `${settings.currencySymbol}${new Intl.NumberFormat("en-US", {
-      maximumFractionDigits: 0,
-    }).format(value)}`;
+  useEffect(() => {
+    let active = true;
+
+    async function load() {
+      const cached = getSaleByInvoiceNumber(invoiceNumber);
+
+      if (cached) {
+        if (active) {
+          setSale(cached);
+        }
+        return;
+      }
+
+      try {
+        const fetched = await fetchSaleByInvoiceNumber(invoiceNumber);
+        if (active) {
+          setSale(fetched);
+        }
+      } catch {
+        if (active) {
+          setSale(null);
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      active = false;
+    };
+  }, [invoiceNumber]);
 
   useEffect(() => {
     if (!sale) return;
@@ -63,8 +97,8 @@ export default function ReceiptPage() {
     );
   }
 
+  const vatAmount = Math.round((sale.total * settings.vatRate) / 100);
   const showCost = settings.showCostOnReceipt;
-  const grossProfit = sale.total - sale.costTotal;
 
   return (
     <MainLayout>
@@ -121,11 +155,14 @@ export default function ReceiptPage() {
 
           <div className="space-y-1">
             {sale.items.map((item) => (
-              <div key={`${sale.id}-${item.productId}-${item.sku}`} className="flex justify-between gap-3">
+              <div
+                key={`${sale.id}-${item.productId}-${item.sku}`}
+                className="flex justify-between gap-3"
+              >
                 <span className="pr-2">
                   {item.name} x{item.quantity}
                 </span>
-                <span>{formatMoney(item.lineTotal)}</span>
+                <span>{formatMoney(item.lineTotal, settings.currencySymbol)}</span>
               </div>
             ))}
           </div>
@@ -135,54 +172,52 @@ export default function ReceiptPage() {
           <div className="space-y-1">
             <div className="flex justify-between">
               <span>Subtotal</span>
-              <span>{formatMoney(sale.subtotal)}</span>
+              <span>{formatMoney(sale.subtotal, settings.currencySymbol)}</span>
             </div>
 
             <div className="flex justify-between">
               <span>Discount</span>
-              <span>-{formatMoney(sale.discountAmount)}</span>
+              <span>-{formatMoney(sale.discountAmount, settings.currencySymbol)}</span>
             </div>
 
             <div className="flex justify-between">
               <span>VAT</span>
-              <span>{formatMoney(Math.round((sale.total * settings.vatRate) / 100))}</span>
+              <span>{formatMoney(vatAmount, settings.currencySymbol)}</span>
             </div>
 
             {showCost && (
               <>
                 <div className="flex justify-between">
                   <span>Cost</span>
-                  <span>{formatMoney(sale.costTotal)}</span>
+                  <span>{formatMoney(sale.costTotal, settings.currencySymbol)}</span>
                 </div>
 
                 <div className="flex justify-between">
                   <span>Profit</span>
-                  <span>{formatMoney(grossProfit)}</span>
+                  <span>{formatMoney(sale.profit, settings.currencySymbol)}</span>
                 </div>
               </>
             )}
 
             <div className="flex justify-between font-bold">
               <span>Total</span>
-              <span>{formatMoney(sale.total)}</span>
+              <span>{formatMoney(sale.total, settings.currencySymbol)}</span>
             </div>
 
             <div className="flex justify-between">
               <span>Cash Received</span>
-              <span>{formatMoney(sale.cashReceived)}</span>
+              <span>{formatMoney(sale.cashReceived, settings.currencySymbol)}</span>
             </div>
 
             <div className="flex justify-between">
               <span>Change</span>
-              <span>{formatMoney(sale.change)}</span>
+              <span>{formatMoney(sale.change, settings.currencySymbol)}</span>
             </div>
           </div>
 
           <div className="my-3 border-t border-dashed border-black" />
 
-          <div className="text-center text-xs">
-            {settings.receiptFooter}
-          </div>
+          <div className="text-center text-xs">{settings.receiptFooter}</div>
         </div>
       </div>
     </MainLayout>
