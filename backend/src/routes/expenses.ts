@@ -14,7 +14,7 @@ const createExpenseSchema = z.object({
   description: z.string().min(1),
   amount: z.coerce.number().min(0),
   paymentMethod: z.enum(["cash", "card"]),
-  shiftId: z.coerce.number().int().nullable().optional(),
+  shiftId: z.coerce.number().int().optional(),
   createdBy: z.string().min(1),
 });
 
@@ -55,9 +55,7 @@ expensesRouter.get("/", async (req: AuthRequest, res, next) => {
       return res.status(403).json({ message: "Forbidden" });
     }
 
-    const db = prisma as any;
-
-    const expenses = await db.expense.findMany({
+    const expenses = await prisma.expense.findMany({
       orderBy: { expenseDate: "desc" },
     });
 
@@ -73,9 +71,7 @@ expensesRouter.get("/:expenseNumber", async (req: AuthRequest, res, next) => {
       return res.status(403).json({ message: "Forbidden" });
     }
 
-    const db = prisma as any;
-
-    const expense = await db.expense.findUnique({
+    const expense = await prisma.expense.findUnique({
       where: { expenseNumber: req.params.expenseNumber },
     });
 
@@ -96,9 +92,8 @@ expensesRouter.post("/", async (req: AuthRequest, res, next) => {
     }
 
     const data = createExpenseSchema.parse(req.body);
-    const db = prisma as any;
 
-    const existing = await db.expense.findUnique({
+    const existing = await prisma.expense.findUnique({
       where: { expenseNumber: data.expenseNumber },
       select: { id: true },
     });
@@ -111,9 +106,9 @@ expensesRouter.post("/", async (req: AuthRequest, res, next) => {
 
     if (data.paymentMethod === "cash") {
       const shift =
-        data.shiftId !== undefined && data.shiftId !== null
-          ? await db.cashShift.findUnique({ where: { id: data.shiftId } })
-          : await db.cashShift.findFirst({
+        data.shiftId !== undefined
+          ? await prisma.cashShift.findUnique({ where: { id: data.shiftId } })
+          : await prisma.cashShift.findFirst({
               where: { status: "open" },
               orderBy: { openedAt: "desc" },
             });
@@ -131,7 +126,7 @@ expensesRouter.post("/", async (req: AuthRequest, res, next) => {
       currentShiftId = shift.id;
     }
 
-    const expense = await db.$transaction(async (tx: any) => {
+    const expense = await prisma.$transaction(async (tx) => {
       const createdExpense = await tx.expense.create({
         data: {
           expenseNumber: data.expenseNumber.trim(),

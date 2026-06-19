@@ -7,7 +7,12 @@ import { getSettings } from "../services/settingsService";
 import { fetchSaleByInvoiceNumber, syncSalesCache } from "../services/salesService";
 import { syncProductsCache } from "../services/productsApi";
 import { syncCashRegisterCache } from "../services/cashRegisterService";
-import { createReturn, getReturns, getReturnsBySaleId, syncReturnsCache } from "../services/returnsService";
+import {
+  createReturn,
+  getReturns,
+  getReturnsBySaleId,
+  syncReturnsCache,
+} from "../services/returnsService";
 
 import type { Sale } from "../types/Sale";
 import type { SalesReturn } from "../types/Return";

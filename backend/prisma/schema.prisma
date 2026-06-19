@@ -147,17 +147,3 @@ model AuditLog {
   details   String
   createdAt DateTime @default(now())
 }
-
-model Expense {
-  id            Int           @id @default(autoincrement())
-  expenseNumber String        @unique
-  expenseDate   DateTime
-  category      String
-  description   String
-  amount        Float
-  paymentMethod PaymentMethod
-  shiftId       Int?
-  createdBy     String
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-}

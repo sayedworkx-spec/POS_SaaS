@@ -1,4 +1,3 @@
-/// <reference types="node" />
 import bcrypt from "bcryptjs";
 import { prisma } from "../src/lib/prisma.js";
 

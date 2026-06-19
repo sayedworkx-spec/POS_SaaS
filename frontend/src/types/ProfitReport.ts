@@ -59,33 +59,11 @@ export interface ProfitReportRecentExpense {
   createdBy: string;
 }
 
-export interface ProfitReportInventory {
-  endingQty: number;
-  endingInventoryValue: number;
-  endingInventorySellValue: number;
-  inventoryPotentialMargin: number;
-  lowStockCount: number;
-  zeroStockCount: number;
-  activeProducts: number;
-  inactiveProducts: number;
-}
-
 export interface ProfitReportSnapshot {
   range: {
     startDate: string;
     endDate: string;
   };
-  overview: {
-    totalProducts: number;
-    activeProducts: number;
-    lowStockProducts: number;
-    todaySalesCount: number;
-    todayRevenue: number;
-    todayProfit: number;
-    returnsCount: number;
-    openShiftsCount: number;
-  };
-  inventory: ProfitReportInventory;
   totals: {
     salesCount: number;
     returnsCount: number;

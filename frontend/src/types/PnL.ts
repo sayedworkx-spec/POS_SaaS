@@ -123,6 +123,5 @@ export interface PnLReportSnapshot {
     paymentMethod: "cash" | "card";
     shiftId: number | null;
     createdBy: string;
-  }>;   
+  }>;
 }
-
