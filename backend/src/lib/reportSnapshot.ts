@@ -177,6 +177,63 @@ function toDateKey(value: Date | string) {
   return date.toISOString().slice(0, 10);
 }
 
+function parseExpenseMeta(note: unknown): {
+  expenseNumber?: string;
+  category?: string;
+  description?: string;
+  createdBy?: string;
+  paymentMethod?: "cash" | "card";
+  expenseDate?: string;
+  shiftId?: number | null;
+} {
+  if (typeof note !== "string" || !note.trim()) {
+    return {};
+  }
+
+  const trimmed = note.trim();
+
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    return {
+      expenseNumber: parsed.expenseNumber ? String(parsed.expenseNumber) : undefined,
+      category: parsed.category ? String(parsed.category) : undefined,
+      description: parsed.description ? String(parsed.description) : undefined,
+      createdBy: parsed.createdBy ? String(parsed.createdBy) : undefined,
+      paymentMethod:
+        parsed.paymentMethod === "card" ? "card" : parsed.paymentMethod === "cash" ? "cash" : undefined,
+      expenseDate: parsed.expenseDate ? String(parsed.expenseDate) : undefined,
+      shiftId:
+        parsed.shiftId === null || parsed.shiftId === undefined
+          ? null
+          : Number(parsed.shiftId),
+    };
+  } catch {
+    // fallback formats:
+    // "EXP-123 | General | Administrator"
+    // "Expense EXP-123"
+    const parts = trimmed
+      .split("|")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (parts.length >= 3) {
+      return {
+        expenseNumber: parts[0],
+        category: parts[1],
+        createdBy: parts[2],
+      };
+    }
+
+    const numberMatch = trimmed.match(/EXP[-\w\d]+/i);
+    return {
+      expenseNumber: numberMatch ? numberMatch[0] : undefined,
+      category: "General",
+      description: trimmed,
+      createdBy: "System",
+    };
+  }
+}
+
 function serializeSale(sale: any): SerializedSale {
   return {
     id: Number(sale.id),
@@ -211,19 +268,30 @@ function serializeReturn(ret: any): SerializedReturn {
 }
 
 function serializeExpense(expense: any): SerializedExpense {
+  const meta = parseExpenseMeta(expense.note);
+
+  const expenseDate =
+    meta.expenseDate ??
+    (expense.createdAt instanceof Date
+      ? expense.createdAt.toISOString()
+      : String(expense.createdAt ?? expense.expenseDate ?? new Date().toISOString()));
+
   return {
     id: Number(expense.id),
-    expenseNumber: String(expense.expenseNumber),
-    expenseDate:
-      expense.expenseDate instanceof Date
-        ? expense.expenseDate.toISOString()
-        : String(expense.expenseDate),
-    category: String(expense.category),
-    description: String(expense.description),
+    expenseNumber: meta.expenseNumber ?? String(expense.expenseNumber ?? `EXP-${expense.id}`),
+    expenseDate,
+    category: meta.category ?? String(expense.category ?? "General"),
+    description: meta.description ?? String(expense.description ?? expense.note ?? ""),
     amount: Number(expense.amount),
-    paymentMethod: expense.paymentMethod as "cash" | "card",
-    shiftId: expense.shiftId !== null ? Number(expense.shiftId) : null,
-    createdBy: String(expense.createdBy),
+    paymentMethod: (meta.paymentMethod ??
+      (expense.type === "OUT" ? "cash" : "cash")) as "cash" | "card",
+    shiftId:
+      meta.shiftId !== undefined
+        ? meta.shiftId
+        : expense.shiftId !== null && expense.shiftId !== undefined
+          ? Number(expense.shiftId)
+          : null,
+    createdBy: meta.createdBy ?? String(expense.createdBy ?? "System"),
   };
 }
 
@@ -285,9 +353,8 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     todaySales,
     recentSales,
     recentSalesWithItems,
-    returnsList,
-    expensesList,
-    movements,
+    returnRecords,
+    movementRecords,
     currentShift,
   ] = await Promise.all([
     db.product.findMany({
@@ -353,15 +420,6 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
       },
       orderBy: { returnDate: "desc" },
     }),
-    db.expense.findMany({
-      where: {
-        expenseDate: {
-          gte: range.start,
-          lte: range.end,
-        },
-      },
-      orderBy: { expenseDate: "desc" },
-    }),
     db.cashMovement.findMany({
       where: {
         createdAt: {
@@ -377,19 +435,26 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     }),
   ]);
 
+  const expensesList = movementRecords
+    .filter((movement: any) => movement.type === "OUT")
+    .map((movement: any) => ({
+      ...movement,
+      ...parseExpenseMeta(movement.note),
+    }));
+
   const lowStockProductsRaw = allProducts
-    .filter((product: any) => product.stock <= product.reorderLevel)
+    .filter((productRow: any) => productRow.stock <= productRow.reorderLevel)
     .sort((a: any, b: any) => a.stock - b.stock || a.name.localeCompare(b.name))
     .slice(0, 10);
 
   const lowStockProducts = lowStockProductsRaw.map(serializeProduct);
 
-  const inventoryRows = allProducts.map((product: any) => ({
-    stock: Number(product.stock),
-    costPrice: Number(product.costPrice),
-    sellPrice: Number(product.sellPrice),
-    reorderLevel: Number(product.reorderLevel),
-    isActive: Boolean(product.isActive),
+  const inventoryRows = allProducts.map((productRow: any) => ({
+    stock: Number(productRow.stock),
+    costPrice: Number(productRow.costPrice),
+    sellPrice: Number(productRow.sellPrice),
+    reorderLevel: Number(productRow.reorderLevel),
+    isActive: Boolean(productRow.isActive),
   }));
 
   const endingQty = inventoryRows.reduce((sum: number, row: any) => sum + row.stock, 0);
@@ -413,26 +478,29 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
   const inventoryInactiveProducts = inventoryRows.filter((row: any) => !row.isActive).length;
 
   const grossRevenue = recentSalesWithItems.reduce(
-    (sum: number, sale: any) => sum + Number(sale.total),
+    (sum: number, saleRow: any) => sum + Number(saleRow.total),
     0
   );
   const grossCOGS = recentSalesWithItems.reduce(
-    (sum: number, sale: any) => sum + Number(sale.costTotal),
+    (sum: number, saleRow: any) => sum + Number(saleRow.costTotal),
     0
   );
   const grossProfit = recentSalesWithItems.reduce(
-    (sum: number, sale: any) => sum + Number(sale.profit),
+    (sum: number, saleRow: any) => sum + Number(saleRow.profit),
     0
   );
 
   let refundAmount = 0;
   let returnedCost = 0;
 
-  for (const ret of returnsList) {
+  for (const ret of returnRecords) {
     refundAmount += Number(ret.refundAmount);
 
-    for (const retItem of ret.items) {
-      const sourceItem = ret.sale.items.find(
+    const retItems = ret.items ?? [];
+    const saleItems = ret.sale?.items ?? [];
+
+    for (const retItem of retItems) {
+      const sourceItem = saleItems.find(
         (saleItem: any) => saleItem.productId === retItem.productId
       );
 
@@ -443,12 +511,12 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
   }
 
   const cashExpenses = expensesList
-    .filter((expense: any) => expense.paymentMethod === "cash")
-    .reduce((sum: number, expense: any) => sum + Number(expense.amount), 0);
+    .filter((item: any) => item.paymentMethod === "cash")
+    .reduce((sum: number, item: any) => sum + Number(item.amount), 0);
 
   const cardExpenses = expensesList
-    .filter((expense: any) => expense.paymentMethod === "card")
-    .reduce((sum: number, expense: any) => sum + Number(expense.amount), 0);
+    .filter((item: any) => item.paymentMethod === "card")
+    .reduce((sum: number, item: any) => sum + Number(item.amount), 0);
 
   const totalExpenses = cashExpenses + cardExpenses;
 
@@ -457,11 +525,11 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
   const operatingProfit = netRevenue - netCOGS;
   const netProfit = operatingProfit - totalExpenses;
 
-  const cashIn = movements
+  const cashIn = movementRecords
     .filter((movement: any) => movement.type === "IN")
     .reduce((sum: number, movement: any) => sum + Number(movement.amount), 0);
 
-  const cashOut = movements
+  const cashOut = movementRecords
     .filter((movement: any) => movement.type === "OUT")
     .reduce((sum: number, movement: any) => sum + Number(movement.amount), 0);
 
@@ -489,8 +557,8 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
 
   const dailyMap = new Map<string, DailyAgg>();
 
-  for (const sale of recentSalesWithItems) {
-    const key = toDateKey(sale.saleDate);
+  for (const saleRecord of recentSalesWithItems) {
+    const key = toDateKey(saleRecord.saleDate);
 
     const entry =
       dailyMap.get(key) ??
@@ -511,14 +579,14 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
       };
 
     entry.salesCount += 1;
-    entry.revenueGross += Number(sale.total);
-    entry.cogsGross += Number(sale.costTotal);
-    entry.grossProfit += Number(sale.profit);
+    entry.revenueGross += Number(saleRecord.total);
+    entry.cogsGross += Number(saleRecord.costTotal);
+    entry.grossProfit += Number(saleRecord.profit);
 
     dailyMap.set(key, entry);
   }
 
-  for (const ret of returnsList) {
+  for (const ret of returnRecords) {
     const key = toDateKey(ret.returnDate);
 
     const entry =
@@ -541,8 +609,11 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
 
     let localReturnedCost = 0;
 
-    for (const retItem of ret.items) {
-      const sourceItem = ret.sale.items.find(
+    const retItems = ret.items ?? [];
+    const saleItems = ret.sale?.items ?? [];
+
+    for (const retItem of retItems) {
+      const sourceItem = saleItems.find(
         (saleItem: any) => saleItem.productId === retItem.productId
       );
 
@@ -558,8 +629,8 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     dailyMap.set(key, entry);
   }
 
-  for (const expense of expensesList) {
-    const key = toDateKey(expense.expenseDate);
+  for (const expenseRecord of expensesList) {
+    const key = toDateKey(expenseRecord.createdAt ?? expenseRecord.expenseDate ?? new Date());
 
     const entry =
       dailyMap.get(key) ??
@@ -579,14 +650,14 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
         netProfit: 0,
       };
 
-    const amount = Number(expense.amount);
+    const amount = Number(expenseRecord.amount);
 
     entry.expensesCount += 1;
 
-    if (expense.paymentMethod === "cash") {
-      entry.expensesCash += amount;
-    } else {
+    if (expenseRecord.paymentMethod === "card") {
       entry.expensesCard += amount;
+    } else {
+      entry.expensesCash += amount;
     }
 
     entry.totalExpenses += amount;
@@ -616,8 +687,8 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     }
   >();
 
-  for (const sale of recentSalesWithItems) {
-    for (const item of sale.items) {
+  for (const saleRecord of recentSalesWithItems) {
+    for (const item of saleRecord.items ?? []) {
       const entry =
         productMap.get(item.productId) ??
         {
@@ -679,8 +750,9 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     { category: string; amount: number; count: number }
   >();
 
-  for (const expense of expensesList) {
-    const category = String(expense.category);
+  for (const expenseRecord of expensesList) {
+    const meta = parseExpenseMeta(expenseRecord.note);
+    const category = String(meta.category ?? "General");
     const entry =
       expensesByCategoryMap.get(category) ??
       {
@@ -689,7 +761,7 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
         count: 0,
       };
 
-    entry.amount += Number(expense.amount);
+    entry.amount += Number(expenseRecord.amount);
     entry.count += 1;
 
     expensesByCategoryMap.set(category, entry);
@@ -742,18 +814,18 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     },
     overview: {
       totalProducts: allProducts.length,
-      activeProducts: allProducts.filter((product: any) => product.isActive).length,
+      activeProducts: allProducts.filter((productRow: any) => productRow.isActive).length,
       lowStockProducts: lowStockProducts.length,
       todaySalesCount: todaySales.length,
       todayRevenue: todaySales.reduce(
-        (sum: number, sale: any) => sum + Number(sale.total),
+        (sum: number, saleRow: any) => sum + Number(saleRow.total),
         0
       ),
       todayProfit: todaySales.reduce(
-        (sum: number, sale: any) => sum + Number(sale.profit),
+        (sum: number, saleRow: any) => sum + Number(saleRow.profit),
         0
       ),
-      returnsCount: returnsList.length,
+      returnsCount: returnRecords.length,
       openShiftsCount,
     },
     inventory: {
@@ -768,14 +840,14 @@ export async function buildReportSnapshot(range: DateRange): Promise<ReportSnaps
     },
     currentShiftSummary,
     recentSales: recentSales.map(serializeSale),
-    recentReturns: returnsList.slice(0, 10).map(serializeReturn),
+    recentReturns: returnRecords.slice(0, 10).map(serializeReturn),
     recentExpenses: expensesList.slice(0, 10).map(serializeExpense),
     lowStockProducts,
     topProducts,
     expensesByCategory,
     totals: {
       salesCount: recentSalesWithItems.length,
-      returnsCount: returnsList.length,
+      returnsCount: returnRecords.length,
       expensesCount: expensesList.length,
       grossRevenue,
       grossCOGS,

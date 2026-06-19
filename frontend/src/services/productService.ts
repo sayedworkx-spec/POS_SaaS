@@ -1,33 +1,9 @@
+import { apiFetch, readApiError } from "./api";
 import type { Product } from "../types/Product";
 
-const STORAGE_KEY = "products";
+const PRODUCTS_CACHE_KEY = "products";
 
-const defaultProducts: Product[] = [
-  {
-    id: 1,
-    sku: "P001",
-    barcode: "100001",
-    name: "T-Shirt Black",
-    categoryId: 1,
-    stock: 0,
-    costPrice: 100,
-    sellPrice: 180,
-    reorderLevel: 10,
-    isActive: true,
-  },
-  {
-    id: 2,
-    sku: "P002",
-    barcode: "100002",
-    name: "Jeans Blue",
-    categoryId: 1,
-    stock: 0,
-    costPrice: 250,
-    sellPrice: 400,
-    reorderLevel: 10,
-    isActive: true,
-  },
-];
+type ProductPayload = Omit<Product, "id">;
 
 function normalizeProduct(raw: any): Product {
   return {
@@ -40,42 +16,70 @@ function normalizeProduct(raw: any): Product {
     costPrice: Number(raw?.costPrice ?? 0),
     sellPrice: Number(raw?.sellPrice ?? 0),
     reorderLevel: Number(raw?.reorderLevel ?? 10),
-    isActive: Boolean(raw?.isActive ?? true),
+    isActive: raw?.isActive === false ? false : true,
   };
 }
 
-function readProducts(): Product[] {
-  const saved = localStorage.getItem(STORAGE_KEY);
+function readCache(): Product[] {
+  const raw = localStorage.getItem(PRODUCTS_CACHE_KEY);
 
-  if (!saved) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultProducts));
-    return defaultProducts;
-  }
+  if (!raw) return [];
 
   try {
-    const parsed = JSON.parse(saved) as any[];
-    const normalized = Array.isArray(parsed)
-      ? parsed.map(normalizeProduct)
-      : defaultProducts;
-
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-    return normalized;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => normalizeProduct(item));
   } catch {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultProducts));
-    return defaultProducts;
+    return [];
   }
 }
 
-function writeProducts(products: Product[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(products));
+function writeCache(products: Product[]) {
+  localStorage.setItem(PRODUCTS_CACHE_KEY, JSON.stringify(products));
+}
+
+function upsertCache(product: Product) {
+  const current = readCache();
+  const index = current.findIndex((item) => item.id === product.id);
+
+  if (index === -1) {
+    current.unshift(product);
+  } else {
+    current[index] = product;
+  }
+
+  writeCache(current);
+}
+
+function removeFromCache(productId: number) {
+  const current = readCache().filter((item) => item.id !== productId);
+  writeCache(current);
+}
+
+function applyOptimisticStockDelta(productId: number, delta: number) {
+  const current = readCache();
+  const index = current.findIndex((item) => item.id === productId);
+
+  if (index === -1) {
+    return null;
+  }
+
+  const next = {
+    ...current[index],
+    stock: Math.max(0, current[index].stock + delta),
+  };
+
+  current[index] = next;
+  writeCache(current);
+  return next;
 }
 
 export function getProducts(): Product[] {
-  return readProducts();
+  return readCache();
 }
 
-export function getProductById(productId: number): Product | undefined {
-  return readProducts().find((product) => product.id === productId);
+export function getProductById(productId: number): Product | null {
+  return readCache().find((product) => product.id === productId) ?? null;
 }
 
 export function findProductByBarcode(value: string) {
@@ -84,12 +88,12 @@ export function findProductByBarcode(value: string) {
   if (!term) return null;
 
   return (
-    readProducts().find(
+    readCache().find(
       (product) =>
         product.barcode.toLowerCase() === term ||
         product.sku.toLowerCase() === term
     ) ??
-    readProducts().find(
+    readCache().find(
       (product) =>
         product.barcode.toLowerCase().includes(term) ||
         product.sku.toLowerCase().includes(term) ||
@@ -99,141 +103,131 @@ export function findProductByBarcode(value: string) {
   );
 }
 
-export function addProduct(product: Omit<Product, "id">) {
-  const products = readProducts();
+export async function syncProductsCache() {
+  const response = await apiFetch("/products");
 
-  const skuExists = products.some(
-    (item) => item.sku.toLowerCase() === product.sku.trim().toLowerCase()
-  );
-  if (skuExists) {
-    throw new Error("SKU already exists");
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
 
-  const barcodeExists = products.some(
-    (item) => item.barcode.toLowerCase() === product.barcode.trim().toLowerCase()
-  );
-  if (barcodeExists) {
-    throw new Error("Barcode already exists");
-  }
+  const payload = (await response.json()) as { products?: unknown };
 
-  const newProduct: Product = {
-    id: Date.now(),
-    ...product,
-    sku: product.sku.trim(),
-    barcode: product.barcode.trim(),
-    name: product.name.trim(),
-  };
+  const products = Array.isArray(payload.products)
+    ? payload.products.map((item) => normalizeProduct(item))
+    : [];
 
-  products.push(newProduct);
-  writeProducts(products);
-
-  return newProduct;
+  writeCache(products);
+  return products;
 }
 
-export function updateProduct(
+export async function fetchProducts() {
+  return syncProductsCache();
+}
+
+export async function createProduct(product: ProductPayload) {
+  const response = await apiFetch("/products", {
+    method: "POST",
+    body: JSON.stringify(product),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { product: unknown };
+  const saved = normalizeProduct(payload.product);
+  upsertCache(saved);
+  return saved;
+}
+
+export async function updateProduct(
   productId: number,
-  updates: Partial<Omit<Product, "id">>
+  updates: Partial<ProductPayload>
 ) {
-  const products = readProducts();
-  const index = products.findIndex((product) => product.id === productId);
+  const response = await apiFetch(`/products/${productId}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
 
-  if (index === -1) {
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { product: unknown };
+  const saved = normalizeProduct(payload.product);
+  upsertCache(saved);
+  return saved;
+}
+
+export async function deleteProduct(productId: number) {
+  const response = await apiFetch(`/products/${productId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok && response.status !== 204) {
+    throw new Error(await readApiError(response));
+  }
+
+  removeFromCache(productId);
+}
+
+export async function toggleProductStatus(productId: number) {
+  const response = await apiFetch(`/products/${productId}/toggle-status`, {
+    method: "PATCH",
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { product: unknown };
+  const saved = normalizeProduct(payload.product);
+  upsertCache(saved);
+  return saved;
+}
+
+export async function adjustProductStock(productId: number, delta: number) {
+  const optimistic = applyOptimisticStockDelta(productId, delta);
+
+  if (!optimistic) {
     throw new Error("Product not found");
   }
 
-  const nextSku =
-    updates.sku !== undefined ? updates.sku.trim() : products[index].sku;
-  const nextBarcode =
-    updates.barcode !== undefined ? updates.barcode.trim() : products[index].barcode;
+  try {
+    const response = await apiFetch(`/products/${productId}/stock`, {
+      method: "PATCH",
+      body: JSON.stringify({ delta }),
+    });
 
-  const duplicateSku = products.some(
-    (item) => item.id !== productId && item.sku.toLowerCase() === nextSku.toLowerCase()
-  );
-  if (duplicateSku) {
-    throw new Error("SKU already exists");
+    if (!response.ok) {
+      throw new Error(await readApiError(response));
+    }
+
+    const payload = (await response.json()) as { product: unknown };
+    const saved = normalizeProduct(payload.product);
+    upsertCache(saved);
+    return saved;
+  } catch (error) {
+    await syncProductsCache().catch(() => undefined);
+    throw error;
   }
-
-  const duplicateBarcode = products.some(
-    (item) =>
-      item.id !== productId &&
-      item.barcode.toLowerCase() === nextBarcode.toLowerCase()
-  );
-  if (duplicateBarcode) {
-    throw new Error("Barcode already exists");
-  }
-
-  products[index] = {
-    ...products[index],
-    ...updates,
-    sku: nextSku,
-    barcode: nextBarcode,
-    name: updates.name !== undefined ? updates.name.trim() : products[index].name,
-    categoryId:
-      updates.categoryId !== undefined ? Number(updates.categoryId) : products[index].categoryId,
-    stock: updates.stock !== undefined ? Number(updates.stock) : products[index].stock,
-    costPrice:
-      updates.costPrice !== undefined ? Number(updates.costPrice) : products[index].costPrice,
-    sellPrice:
-      updates.sellPrice !== undefined ? Number(updates.sellPrice) : products[index].sellPrice,
-    reorderLevel:
-      updates.reorderLevel !== undefined
-        ? Number(updates.reorderLevel)
-        : products[index].reorderLevel,
-    isActive: updates.isActive ?? products[index].isActive,
-  };
-
-  writeProducts(products);
-  return products[index];
 }
 
-export function deleteProduct(productId: number) {
-  const products = readProducts();
-  const filtered = products.filter((product) => product.id !== productId);
-  writeProducts(filtered);
+export async function updateProductStock(productId: number, delta: number) {
+  return adjustProductStock(productId, delta);
 }
 
-export function toggleProductStatus(productId: number) {
-  const products = readProducts();
-  const index = products.findIndex((product) => product.id === productId);
+export async function reduceProductStock(productId: number, quantity: number) {
+  return adjustProductStock(productId, -Math.abs(quantity));
+}
 
-  if (index === -1) {
+export async function setProductStock(productId: number, stock: number) {
+  const current = getProductById(productId);
+
+  if (!current) {
     throw new Error("Product not found");
   }
 
-  products[index] = {
-    ...products[index],
-    isActive: !products[index].isActive,
-  };
-
-  writeProducts(products);
-  return products[index];
-}
-
-export function updateProductStock(productId: number, quantity: number) {
-  const products = readProducts();
-  const product = products.find((item) => item.id === productId);
-
-  if (!product) {
-    return;
-  }
-
-  product.stock += quantity;
-  writeProducts(products);
-}
-
-export function reduceProductStock(productId: number, quantity: number) {
-  const products = readProducts();
-  const product = products.find((item) => item.id === productId);
-
-  if (!product) {
-    return false;
-  }
-
-  if (product.stock < quantity) {
-    return false;
-  }
-
-  product.stock -= quantity;
-  writeProducts(products);
-  return true;
+  const delta = stock - current.stock;
+  return adjustProductStock(productId, delta);
 }

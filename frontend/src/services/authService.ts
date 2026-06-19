@@ -8,8 +8,8 @@ import {
 import { addAuditLog } from "./auditService";
 import type { User, UserRole } from "../types/User";
 
-const USERS_KEY = "users";
 const CURRENT_USER_KEY = "currentUser";
+const USERS_CACHE_KEY = "users_cache";
 
 type PublicUser = Omit<User, "password">;
 type AuthResponse = {
@@ -21,7 +21,6 @@ function normalizeRole(raw: unknown, fallback: UserRole = "cashier"): UserRole {
   if (raw === "admin" || raw === "cashier" || raw === "warehouse") {
     return raw;
   }
-
   return fallback;
 }
 
@@ -69,9 +68,7 @@ function readStoredCurrentUser(): User | null {
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
     const parts = token.split(".");
-    if (parts.length < 2) {
-      return null;
-    }
+    if (parts.length < 2) return null;
 
     const base64Url = parts[1];
     const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
@@ -86,7 +83,6 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
 function userFromToken(token: string): User | null {
   const payload = decodeJwtPayload(token);
-
   if (!payload) return null;
 
   const id = Number(payload.sub ?? 0);
@@ -107,123 +103,144 @@ function userFromToken(token: string): User | null {
   };
 }
 
-function seedUsers(): User[] {
-  return [
-    {
-      id: 1,
-      name: "Administrator",
-      email: "admin@demo.com",
-      password: "admin123",
-      role: "admin",
-      isActive: true,
-    },
-    {
-      id: 2,
-      name: "Cashier",
-      email: "cashier@demo.com",
-      password: "cashier123",
-      role: "cashier",
-      isActive: true,
-    },
-    {
-      id: 3,
-      name: "Warehouse",
-      email: "warehouse@demo.com",
-      password: "warehouse123",
-      role: "warehouse",
-      isActive: true,
-    },
-  ];
-}
+function readUsersCache(): User[] {
+  const raw = localStorage.getItem(USERS_CACHE_KEY);
 
-function readLegacyUsers(): User[] {
-  const raw = localStorage.getItem(USERS_KEY);
-
-  if (!raw) {
-    const seeded = seedUsers();
-    localStorage.setItem(USERS_KEY, JSON.stringify(seeded));
-    return seeded;
-  }
+  if (!raw) return [];
 
   try {
     const parsed = JSON.parse(raw) as unknown;
-
-    if (!Array.isArray(parsed)) {
-      const seeded = seedUsers();
-      localStorage.setItem(USERS_KEY, JSON.stringify(seeded));
-      return seeded;
-    }
-
-    const normalized = parsed.map((item) =>
-      normalizeUser(item as Record<string, unknown>)
-    );
-
-    localStorage.setItem(USERS_KEY, JSON.stringify(normalized));
-    return normalized;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => normalizeUser(item as Record<string, unknown>));
   } catch {
-    const seeded = seedUsers();
-    localStorage.setItem(USERS_KEY, JSON.stringify(seeded));
-    return seeded;
+    return [];
   }
 }
 
-function writeLegacyUsers(users: User[]) {
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
+function writeUsersCache(users: User[]) {
+  localStorage.setItem(USERS_CACHE_KEY, JSON.stringify(users));
 }
 
-function createLegacyUserRecord(input: {
+function upsertUserCache(user: User) {
+  const current = readUsersCache();
+  const index = current.findIndex((item) => item.id === user.id);
+
+  if (index === -1) {
+    current.unshift(user);
+  } else {
+    current[index] = user;
+  }
+
+  writeUsersCache(current);
+}
+
+function removeUserCache(userId: number) {
+  writeUsersCache(readUsersCache().filter((user) => user.id !== userId));
+}
+
+export async function syncUsersCache() {
+  const response = await apiFetch("/users");
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { users?: unknown };
+  const users = Array.isArray(payload.users)
+    ? payload.users.map((item) => normalizeUser(item as Record<string, unknown>))
+    : [];
+
+  writeUsersCache(users);
+  return users;
+}
+
+export function getUsers(): User[] {
+  return readUsersCache();
+}
+
+export function getUserById(userId: number): User | null {
+  return readUsersCache().find((user) => user.id === userId) ?? null;
+}
+
+export async function createUser(input: {
   name: string;
   email: string;
   password: string;
   role?: UserRole;
   isActive?: boolean;
 }) {
-  const name = input.name.trim();
-  const email = input.email.trim().toLowerCase();
-  const password = input.password;
+  const response = await apiFetch("/users", {
+    method: "POST",
+    body: JSON.stringify({
+      name: input.name,
+      email: input.email,
+      password: input.password,
+      role: input.role ?? "cashier",
+      isActive: input.isActive ?? true,
+    }),
+  });
 
-  if (!name || !email || !password) {
-    throw new Error("All fields are required");
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
 
-  const users = readLegacyUsers();
-  const emailExists = users.some((item) => item.email.toLowerCase() === email);
+  const payload = (await response.json()) as { user?: unknown };
+  const saved = normalizeUser(payload.user as Record<string, unknown>);
+  upsertUserCache(saved);
 
-  if (emailExists) {
-    throw new Error("Email already exists");
+  void addAuditLog("USER_CREATED", `Created user ${saved.name}`, saved.name);
+
+  return saved;
+}
+
+export async function updateUser(
+  userId: number,
+  updates: Partial<Pick<User, "name" | "email" | "password" | "role" | "isActive">>
+) {
+  const response = await apiFetch(`/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
 
-  const newUser: User = {
-    id: Date.now(),
-    name,
-    email,
-    password,
-    role: input.role ?? "cashier",
-    isActive: input.isActive ?? true,
-  };
+  const payload = (await response.json()) as { user?: unknown };
+  const saved = normalizeUser(payload.user as Record<string, unknown>);
+  upsertUserCache(saved);
 
-  writeLegacyUsers([...users, newUser]);
-  return newUser;
+  void addAuditLog("USER_UPDATED", `Updated user ${saved.name}`, saved.name);
+
+  return saved;
 }
 
-export function getUsers(): User[] {
-  return readLegacyUsers();
-}
+export async function deleteUser(userId: number) {
+  const current = getUserById(userId);
 
-export function getUserById(userId: number): User | null {
-  return readLegacyUsers().find((user) => user.id === userId) ?? null;
+  const response = await apiFetch(`/users/${userId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok && response.status !== 204) {
+    throw new Error(await readApiError(response));
+  }
+
+  removeUserCache(userId);
+
+  void addAuditLog(
+    "USER_DELETED",
+    `Deleted user ${current?.name ?? userId}`,
+    current?.name ?? "Admin"
+  );
 }
 
 export function getCurrentUser(): User | null {
   const stored = readStoredCurrentUser();
-  if (stored) {
-    return stored;
-  }
+  if (stored) return stored;
 
   const token = getStoredToken();
-  if (!token) {
-    return null;
-  }
+  if (!token) return null;
 
   const tokenUser = userFromToken(token);
   if (!tokenUser) {
@@ -277,7 +294,11 @@ export async function login(email: string, password: string) {
   });
 
   if (!response.ok) {
-    void addAuditLog("LOGIN_FAILED", `Failed login attempt for ${email.trim().toLowerCase()}`, "System");
+    void addAuditLog(
+      "LOGIN_FAILED",
+      `Failed login attempt for ${email.trim().toLowerCase()}`,
+      "System"
+    );
     throw new Error(await readApiError(response));
   }
 
@@ -312,56 +333,16 @@ export async function register(input: {
   const data = (await response.json()) as AuthResponse;
   saveAuthState(data.token, data.user);
 
-  void addAuditLog("USER_CREATED", `${data.user.name} (${data.user.role})`, data.user.name);
+  void addAuditLog(
+    "USER_CREATED",
+    `${data.user.name} (${data.user.role})`,
+    data.user.name
+  );
 
   return data.user;
 }
 
 export const signup = register;
-
-export function createUser(input: {
-  name: string;
-  email: string;
-  password: string;
-  role?: UserRole;
-  isActive?: boolean;
-}) {
-  return createLegacyUserRecord(input);
-}
-
-export function updateUser(
-  userId: number,
-  updates: Partial<Pick<User, "name" | "email" | "password" | "role" | "isActive">>
-) {
-  const users = readLegacyUsers();
-  const index = users.findIndex((user) => user.id === userId);
-
-  if (index === -1) {
-    throw new Error("User not found");
-  }
-
-  const current = users[index];
-  const updated: User = {
-    ...current,
-    ...updates,
-    name: updates.name !== undefined ? updates.name.trim() : current.name,
-    email:
-      updates.email !== undefined
-        ? updates.email.trim().toLowerCase()
-        : current.email,
-    role: updates.role ?? current.role,
-    isActive: updates.isActive ?? current.isActive,
-  };
-
-  users[index] = updated;
-  writeLegacyUsers(users);
-  return updated;
-}
-
-export function deleteUser(userId: number) {
-  const users = readLegacyUsers();
-  writeLegacyUsers(users.filter((user) => user.id !== userId));
-}
 
 export function isAuthenticated() {
   return Boolean(getStoredToken() || readStoredCurrentUser());

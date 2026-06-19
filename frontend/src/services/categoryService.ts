@@ -1,6 +1,7 @@
+import { apiFetch, readApiError } from "./api";
 import type { Category } from "../types/Category";
 
-const STORAGE_KEY = "categories";
+const CATEGORIES_CACHE_KEY = "categories_cache";
 
 const defaultCategories: Category[] = [
   { id: 1, name: "Clothes" },
@@ -9,29 +10,47 @@ const defaultCategories: Category[] = [
   { id: 4, name: "Bags" },
 ];
 
-function readCategories(): Category[] {
-  const raw = localStorage.getItem(STORAGE_KEY);
+function normalizeCategory(raw: any): Category {
+  return {
+    id: Number(raw?.id ?? Date.now()),
+    name: String(raw?.name ?? "").trim() || "Category",
+  };
+}
 
-  if (!raw) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultCategories));
-    return defaultCategories;
-  }
+function readCache(): Category[] {
+  const raw = localStorage.getItem(CATEGORIES_CACHE_KEY);
+
+  if (!raw) return [];
 
   try {
-    const parsed = JSON.parse(raw) as Category[];
-    return parsed.length > 0 ? parsed : defaultCategories;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => normalizeCategory(item));
   } catch {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultCategories));
-    return defaultCategories;
+    return [];
   }
 }
 
-function writeCategories(categories: Category[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(categories));
+function writeCache(categories: Category[]) {
+  localStorage.setItem(CATEGORIES_CACHE_KEY, JSON.stringify(categories));
+}
+
+function upsertCache(category: Category) {
+  const current = readCache();
+  const index = current.findIndex((item) => item.id === category.id);
+
+  if (index === -1) {
+    current.unshift(category);
+  } else {
+    current[index] = category;
+  }
+
+  writeCache(current);
 }
 
 export function getCategories(): Category[] {
-  return readCategories().slice().sort((a, b) => a.id - b.id);
+  const cached = readCache();
+  return cached.length > 0 ? cached.slice().sort((a, b) => a.id - b.id) : defaultCategories;
 }
 
 export function getCategoryById(categoryId: number): Category | undefined {
@@ -42,30 +61,41 @@ export function getCategoryNameById(categoryId: number): string {
   return getCategoryById(categoryId)?.name ?? `Category ${categoryId}`;
 }
 
-export function addCategory(name: string) {
+export async function syncCategoriesCache() {
+  const response = await apiFetch("/categories");
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { categories?: unknown };
+  const categories = Array.isArray(payload.categories)
+    ? payload.categories.map((item) => normalizeCategory(item))
+    : [];
+
+  writeCache(categories);
+  return categories;
+}
+
+export async function addCategory(name: string) {
   const trimmed = name.trim();
 
   if (!trimmed) {
     throw new Error("Category name is required");
   }
 
-  const categories = getCategories();
+  const response = await apiFetch("/categories", {
+    method: "POST",
+    body: JSON.stringify({ name: trimmed }),
+  });
 
-  const exists = categories.some(
-    (category) => category.name.toLowerCase() === trimmed.toLowerCase()
-  );
-
-  if (exists) {
-    throw new Error("Category already exists");
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
   }
 
-  const newCategory: Category = {
-    id: Date.now(),
-    name: trimmed,
-  };
+  const payload = (await response.json()) as { category?: unknown };
+  const saved = normalizeCategory(payload.category);
 
-  categories.push(newCategory);
-  writeCategories(categories);
-
-  return newCategory;
+  upsertCache(saved);
+  return saved;
 }

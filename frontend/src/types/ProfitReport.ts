@@ -59,33 +59,59 @@ export interface ProfitReportRecentExpense {
   createdBy: string;
 }
 
+export interface ProfitReportOverview {
+  totalProducts: number;
+  activeProducts: number;
+  lowStockProducts: number;
+  todaySalesCount: number;
+  todayRevenue: number;
+  todayProfit: number;
+  returnsCount: number;
+  openShiftsCount: number;
+}
+
+export interface ProfitReportInventory {
+  endingQty: number;
+  endingInventoryValue: number;
+  endingInventorySellValue: number;
+  inventoryPotentialMargin: number;
+  lowStockCount: number;
+  zeroStockCount: number;
+  activeProducts: number;
+  inactiveProducts: number;
+}
+
+export interface ProfitReportTotals {
+  salesCount: number;
+  returnsCount: number;
+  expensesCount: number;
+  grossRevenue: number;
+  grossCOGS: number;
+  grossProfit: number;
+  refundAmount: number;
+  returnedCost: number;
+  netRevenue: number;
+  netCOGS: number;
+  operatingProfit: number;
+  totalExpenses: number;
+  cashExpenses: number;
+  cardExpenses: number;
+  netProfit: number;
+  cashIn: number;
+  cashOut: number;
+  netCash: number;
+  averageOrderValue: number;
+  marginPercent: number;
+}
+
 export interface ProfitReportSnapshot {
   range: {
     startDate: string;
     endDate: string;
   };
-  totals: {
-    salesCount: number;
-    returnsCount: number;
-    expensesCount: number;
-    grossRevenue: number;
-    grossCOGS: number;
-    grossProfit: number;
-    refundAmount: number;
-    returnedCost: number;
-    netRevenue: number;
-    netCOGS: number;
-    operatingProfit: number;
-    totalExpenses: number;
-    cashExpenses: number;
-    cardExpenses: number;
-    netProfit: number;
-    cashIn: number;
-    cashOut: number;
-    netCash: number;
-    averageOrderValue: number;
-    marginPercent: number;
-  };
+  overview: ProfitReportOverview;
+  inventory: ProfitReportInventory;
+  totals: ProfitReportTotals;
   dailyRows: ProfitReportDailyRow[];
   topProducts: ProfitReportTopProduct[];
   lowStockProducts: {

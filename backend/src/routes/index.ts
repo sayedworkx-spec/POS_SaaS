@@ -14,6 +14,10 @@ import { expensesRouter } from "./expenses.js";
 import { inventoryValuationRouter } from "./inventory-valuation.js";
 import { pnlReportRouter } from "./pnl-report.js";
 import { executiveSummaryRouter } from "./executive-summary.js";
+import { categoriesRouter } from "./categories.js";
+import { settingsRouter } from "./settings.js";
+import { purchasesRouter } from "./purchases.js";
+import { suspendedSalesRouter } from "./suspended-sales.js";
 
 export const apiRouter = Router();
 
@@ -31,3 +35,7 @@ apiRouter.use("/expenses", expensesRouter);
 apiRouter.use("/inventory-valuation", inventoryValuationRouter);
 apiRouter.use("/pnl-report", pnlReportRouter);
 apiRouter.use("/executive-summary", executiveSummaryRouter);
+apiRouter.use("/categories", categoriesRouter);
+apiRouter.use("/settings", settingsRouter);
+apiRouter.use("/purchases", purchasesRouter);
+apiRouter.use("/suspended-sales", suspendedSalesRouter);

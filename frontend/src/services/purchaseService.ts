@@ -1,60 +1,86 @@
+import { apiFetch, readApiError } from "./api";
 import type { Purchase } from "../types/Purchase";
+import { syncProductsCache } from "./productService";
 
-import {
-  updateProductStock
-} from "./productService";
+const PURCHASES_CACHE_KEY = "purchases_cache";
 
-import {
-  saveInventoryMovement
-} from "./inventoryMovementService";
-
-const PURCHASES_KEY = "purchases";
-
-export function getPurchases(): Purchase[] {
-  return JSON.parse(
-    localStorage.getItem(
-      PURCHASES_KEY
-    ) || "[]"
-  );
+function normalizePurchase(raw: any): Purchase {
+  return {
+    id: Number(raw?.id ?? Date.now()),
+    productId: Number(raw?.productId ?? 0),
+    quantity: Number(raw?.quantity ?? 0),
+    unitCost: Number(raw?.unitCost ?? 0),
+    purchaseDate: String(raw?.purchaseDate ?? new Date().toISOString()),
+  };
 }
 
-export function addPurchase(
-  purchase: Omit<Purchase, "id">
-) {
-  const purchases =
-    getPurchases();
+function readCache(): Purchase[] {
+  const raw = localStorage.getItem(PURCHASES_CACHE_KEY);
 
-  const newPurchase: Purchase = {
-    id: Date.now(),
-    ...purchase,
-  };
+  if (!raw) return [];
 
-  purchases.push(
-    newPurchase
-  );
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => normalizePurchase(item));
+  } catch {
+    return [];
+  }
+}
 
-  localStorage.setItem(
-    PURCHASES_KEY,
-    JSON.stringify(
-      purchases
-    )
-  );
+function writeCache(purchases: Purchase[]) {
+  localStorage.setItem(PURCHASES_CACHE_KEY, JSON.stringify(purchases));
+}
 
-  updateProductStock(
-    purchase.productId,
-    purchase.quantity
-  );
+function upsertCache(purchase: Purchase) {
+  const current = readCache();
+  const index = current.findIndex((item) => item.id === purchase.id);
 
-  saveInventoryMovement({
-    id: Date.now(),
-    productId:
-      purchase.productId,
-    movementType: "IN",
-    quantity:
-      purchase.quantity,
-    movementDate:
-      new Date().toISOString(),
+  if (index === -1) {
+    current.unshift(purchase);
+  } else {
+    current[index] = purchase;
+  }
+
+  writeCache(current);
+}
+
+export function getPurchases(): Purchase[] {
+  return readCache();
+}
+
+export async function syncPurchasesCache() {
+  const response = await apiFetch("/purchases");
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { purchases?: unknown };
+  const purchases = Array.isArray(payload.purchases)
+    ? payload.purchases.map((item) => normalizePurchase(item))
+    : [];
+
+  writeCache(purchases);
+  return purchases;
+}
+
+export async function addPurchase(purchase: Omit<Purchase, "id">) {
+  const response = await apiFetch("/purchases", {
+    method: "POST",
+    body: JSON.stringify(purchase),
   });
 
-  return newPurchase;
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  const payload = (await response.json()) as { purchase?: unknown };
+  const saved = normalizePurchase(payload.purchase);
+
+  upsertCache(saved);
+
+  await syncProductsCache().catch(() => undefined);
+
+  return saved;
 }

@@ -1,24 +1,29 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
-import { getCurrentUser } from "./services/authService";
-import { canAccessPath } from "./config/access";
-
-import ExecutiveSummaryPage from "./pages/ExecutiveSummaryPage";
+import LoginPage from "./pages/LoginPage";
+import SignupPage from "./pages/SignupPage";
 import DashboardPage from "./pages/DashboardPage";
-import SalesPage from "./pages/SalesPage";
-import CashRegisterPage from "./pages/CashRegisterPage";
+import ProfitReportPage from "./pages/ProfitReportPage";
+import ExpensesPage from "./pages/ExpensesPage";
 import ProductsPage from "./pages/ProductsPage";
 import UsersPage from "./pages/UsersPage";
-import ProfitReportPage from "./pages/ProfitReportPage";
-import PnLPage from "./pages/PnLPage";
-import StockReportPage from "./pages/StockReportPage";
-import ExpensesPage from "./pages/ExpensesPage";
+import SalesPage from "./pages/SalesPage";
+import SalesHistoryPage from "./pages/SalesHistoryPage";
 import ReturnsPage from "./pages/ReturnsPage";
+import PurchasesPage from "./pages/PurchasesPage";
+import InventoryPage from "./pages/InventoryPage";
+import StockReportPage from "./pages/StockReportPage";
+import CashRegisterPage from "./pages/CashRegisterPage";
+import BarcodeLabelsPage from "./pages/BarcodeLabelsPage";
+import SuspendedSalesPage from "./pages/SuspendedSalesPage";
 import AuditLogsPage from "./pages/AuditLogsPage";
-import LoginPage from "./pages/LoginPage";
+import SettingsPage from "./pages/SettingsPage";
 import ForbiddenPage from "./pages/ForbiddenPage";
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+import { getCurrentUser } from "./services/authService";
+import type { UserRole } from "./types/User";
+
+function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = getCurrentUser();
 
   if (!user) {
@@ -28,12 +33,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function RoleGuard({
+function RequireRoles({
   children,
-  path,
+  allowedRoles,
 }: {
   children: React.ReactNode;
-  path: string;
+  allowedRoles: UserRole[];
 }) {
   const user = getCurrentUser();
 
@@ -41,136 +46,181 @@ function RoleGuard({
     return <Navigate to="/login" replace />;
   }
 
-  if (!canAccessPath(user.role, path)) {
+  if (!allowedRoles.includes(user.role)) {
     return <Navigate to="/forbidden" replace />;
   }
 
   return <>{children}</>;
 }
 
-function AppHomeRedirect() {
+function RootRedirect() {
   const user = getCurrentUser();
 
   if (!user) {
     return <Navigate to="/login" replace />;
   }
 
-  return <Navigate to="/home" replace />;
+  switch (user.role) {
+    case "admin":
+      return <Navigate to="/dashboard" replace />;
+    case "warehouse":
+      return <Navigate to="/inventory" replace />;
+    case "cashier":
+    default:
+      return <Navigate to="/sales" replace />;
+  }
 }
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<AppHomeRedirect />} />
+        <Route path="/" element={<RootRedirect />} />
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/signup" element={<SignupPage />} />
         <Route path="/forbidden" element={<ForbiddenPage />} />
-
-        <Route
-          path="/home"
-          element={
-            <ProtectedRoute>
-              <ExecutiveSummaryPage />
-            </ProtectedRoute>
-          }
-        />
 
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute>
+            <RequireAuth>
               <DashboardPage />
-            </ProtectedRoute>
+            </RequireAuth>
           }
         />
 
         <Route
           path="/sales"
           element={
-            <RoleGuard path="/sales">
+            <RequireRoles allowedRoles={["admin", "cashier"]}>
               <SalesPage />
-            </RoleGuard>
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/suspended-sales"
+          element={
+            <RequireRoles allowedRoles={["admin", "cashier"]}>
+              <SuspendedSalesPage />
+            </RequireRoles>
           }
         />
 
         <Route
           path="/cash-register"
           element={
-            <RoleGuard path="/cash-register">
+            <RequireRoles allowedRoles={["admin", "cashier"]}>
               <CashRegisterPage />
-            </RoleGuard>
+            </RequireRoles>
           }
         />
 
         <Route
-          path="/products"
+          path="/sales-history"
           element={
-            <RoleGuard path="/products">
-              <ProductsPage />
-            </RoleGuard>
-          }
-        />
-
-        <Route
-          path="/users"
-          element={
-            <RoleGuard path="/users">
-              <UsersPage />
-            </RoleGuard>
-          }
-        />
-
-        <Route
-          path="/inventory"
-          element={
-            <ProtectedRoute>
-              <StockReportPage />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/expenses"
-          element={
-            <ProtectedRoute>
-              <ExpensesPage />
-            </ProtectedRoute>
+            <RequireRoles allowedRoles={["admin", "cashier"]}>
+              <SalesHistoryPage />
+            </RequireRoles>
           }
         />
 
         <Route
           path="/returns"
           element={
-            <ProtectedRoute>
+            <RequireRoles allowedRoles={["admin", "cashier"]}>
               <ReturnsPage />
-            </ProtectedRoute>
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/barcode-labels"
+          element={
+            <RequireRoles allowedRoles={["admin", "cashier"]}>
+              <BarcodeLabelsPage />
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/products"
+          element={
+            <RequireRoles allowedRoles={["admin", "warehouse"]}>
+              <ProductsPage />
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/purchases"
+          element={
+            <RequireRoles allowedRoles={["admin", "warehouse"]}>
+              <PurchasesPage />
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/inventory"
+          element={
+            <RequireRoles allowedRoles={["admin", "warehouse"]}>
+              <InventoryPage />
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/stock-report"
+          element={
+            <RequireRoles allowedRoles={["admin", "warehouse"]}>
+              <StockReportPage />
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/expenses"
+          element={
+            <RequireRoles allowedRoles={["admin"]}>
+              <ExpensesPage />
+            </RequireRoles>
           }
         />
 
         <Route
           path="/profit-report"
           element={
-            <RoleGuard path="/profit-report">
+            <RequireRoles allowedRoles={["admin"]}>
               <ProfitReportPage />
-            </RoleGuard>
-          }
-        />
-
-        <Route
-          path="/pnl"
-          element={
-            <RoleGuard path="/pnl">
-              <PnLPage />
-            </RoleGuard>
+            </RequireRoles>
           }
         />
 
         <Route
           path="/audit-logs"
           element={
-            <RoleGuard path="/audit-logs">
+            <RequireRoles allowedRoles={["admin"]}>
               <AuditLogsPage />
-            </RoleGuard>
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/settings"
+          element={
+            <RequireRoles allowedRoles={["admin"]}>
+              <SettingsPage />
+            </RequireRoles>
+          }
+        />
+
+        <Route
+          path="/users"
+          element={
+            <RequireRoles allowedRoles={["admin"]}>
+              <UsersPage />
+            </RequireRoles>
           }
         />
 
